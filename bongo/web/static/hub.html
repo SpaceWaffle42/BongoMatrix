@@ -42,9 +42,13 @@ main { padding:16px; display:grid; gap:16px; grid-template-columns:repeat(auto-f
 .warn { color:var(--danger); font-size:13px; }
 .dot { width:8px; height:8px; border-radius:50%; display:inline-block; background:var(--good); }
 .dot.off { background:var(--danger); }
-.btn { margin-top:auto; align-self:flex-start; background:var(--amber); color:var(--ink); border:1px solid var(--amber); padding:9px 14px;
+.acts { margin-top:auto; display:flex; gap:8px; flex-wrap:wrap; }
+.btn { background:var(--amber); color:var(--ink); border:1px solid var(--amber); padding:9px 14px;
   font:600 14px var(--ui); text-decoration:none; }
 .btn:hover { background:var(--amber-hover); }
+.btn.plain { background:var(--raise); color:var(--text); border-color:var(--line-2); }
+.btn.plain:hover { background:#20242A; border-color:#3A3F47; }
+.soft { white-space:nowrap; } .ready { color:var(--amber); }
 .empty { color:var(--muted); grid-column:1 / -1; padding:40px 0; text-align:center; }
 footer { color:var(--muted); font-size:12px; text-align:center; padding:8px 16px 24px; }
 </style>
@@ -58,7 +62,7 @@ footer { color:var(--muted); font-size:12px; text-align:center; padding:8px 16px
   <div class="pick" role="group" aria-label="View"><span>View</span><span><button type="button" id="logo-normal" aria-pressed="true" title="Each Matrix's live picture, and the round-wall logo">Normal</button><button type="button" id="logo-simple" aria-pressed="false" title="Just the details: no pictures, and the three-block logo (easier to tell apart when small)">Simple</button></span></div>
 </header>
 <main id="cards" aria-live="polite"><p class="empty">Looking for Matrices…</p></main>
-<footer>Read-only: open a Matrix's dashboard to change it. Each one pairs on its own.</footer>
+<footer>Read-only: open a Matrix's dashboard to change or update it. Each one pairs on its own.</footer>
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -82,13 +86,31 @@ function ago(s) {
   return `${Math.round(s / 60)} min ago`;
 }
 
+/** What a card says about its Matrix's software, and whether it gets an Update… button. A Matrix says for itself
+ *  whether a new version is ready (update: true or false, from its own daily look). An older build says nothing:
+ *  its card shows what it always did (the version, and a badge when another Matrix here runs a newer one) and has
+ *  no button. Nor has one that isn't answering, or one that is updating now. */
+function software(m) {
+  const off = !!m.error;
+  // its build is its version, as its own Settings › Software names it; an older build only has the number it announces
+  const version = !off && m.build ? `<span title="Bongo Matrix ${esc(m.version || '?')}, build ${esc(m.build)}">${esc(m.build)}</span>` : `v${esc(m.version || '?')}`;
+  if (!off && m.updating === true) return { ready: false, line: `<span class="soft">${version} · <span class="ready">updating…</span></span>` };
+  if (!off && m.update === true) return { ready: true, line: `<span class="soft">${version} · <span class="ready">update available</span></span>` };
+  if (!off && m.update === false) return { ready: false, line: `<span class="soft">${version} · up to date</span>` };
+  return { ready: false, line: `<span>${version}</span>${m.behind ? '<span class="badge update">update available</span>' : ''}` };
+}
+/** Update… only opens that Matrix's own dashboard at Settings › Software, with the update ready to confirm: the hub
+ *  can't update anything itself. The link says where to go and nothing else. */
+const updateLink = (m) => `${m.url}settings#update`;
+
 function card(m) {
   const off = !!m.error;
+  const soft = software(m);
   const picture = style === 'simple' ? null   // (Simple: just the details, and no picture fetched every 5 s)
     : off ? '<span class="none">No picture</span>'
     : m.picture === false ? '<span class="none">Picture turned off</span>'
     : `<img alt="What ${esc(m.name)} is showing" src="${esc(m.url)}api/public/frame.png?t=${tick}">`;
-  const warnings = off ? [m.error] : (m.warnings || []);
+  const warnings = off ? [m.error] : [...(m.warnings || []), ...(soft.ready && m.rolled_back === true ? ['Last try rolled back: it didn\'t start'] : [])];
   return `<article class="card">
     ${picture === null ? '' : `<div class="screen">${picture}</div>`}
     <div class="body">
@@ -96,9 +118,9 @@ function card(m) {
       <div class="addr">${esc(m.address)}${m.port && m.port !== 80 ? ':' + esc(m.port) : ''}</div>
       <div class="playing">${off ? '—' : m.sleeping ? 'Asleep' : m.paused ? `Paused · ${esc(m.playing || '')}` : esc(m.playing || 'Starting')}</div>
       <div class="meta"><span><span class="dot${off ? ' off' : ''}"></span> ${ago(m.seen_ago)}</span>
-        <span>v${esc(m.version || '?')}</span>${m.behind ? '<span class="badge update">update available</span>' : ''}</div>
+        ${soft.line}</div>
       ${warnings.map((w) => `<div class="warn">${esc(w)}</div>`).join('')}
-      <a class="btn" href="${esc(m.url)}" rel="noopener">Open dashboard</a>
+      <div class="acts">${soft.ready ? `<a class="btn" href="${esc(updateLink(m))}" rel="noopener" title="Opens ${esc(m.name)}'s own dashboard at Settings › Software, with the update ready to confirm. Your browser pairs with it there first if it hasn't already.">Update…</a>` : ''}<a class="btn${soft.ready ? ' plain' : ''}" href="${esc(m.url)}" rel="noopener">Open dashboard</a></div>
     </div>
   </article>`;
 }
@@ -114,7 +136,9 @@ async function load() {
       return;
     }
     const list = data.matrices || [];
-    $('sub').textContent = list.length ? `${list.length} Matri${list.length === 1 ? 'x' : 'ces'} on this network` : 'Every Matrix on this network';
+    const ready = list.filter((m) => software(m).ready).length;
+    $('sub').textContent = list.length ? `${list.length} Matri${list.length === 1 ? 'x' : 'ces'} on this network${ready ? ` · ${ready} ${ready === 1 ? 'has' : 'have'} an update` : ''}`
+      : 'Every Matrix on this network';
     shown = list;
     $('cards').innerHTML = list.length ? list.map(card).join('')
       : `<p class="empty">${data.available === false ? 'The hub isn\'t running on this Matrix.' : 'Looking for Matrices…'}</p>`;

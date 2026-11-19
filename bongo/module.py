@@ -92,6 +92,12 @@ class Module:
     # settings are dropped (``config.tidy``); returns notes for the log.
     migrate: Callable[[dict], list[str]] | None = None
     verify: Callable[[dict], list[str]] | None = None
+    # ``verify_parts(settings) -> list``: the things in the settings that ``verify`` checks, one by one (News: its
+    # feeds' addresses; they must be hashable). With it, ``verify(settings, parts)`` is called only with the parts
+    # that no screen of this module in the saved config already has, and not at all when there are none: a part
+    # accepted once isn't checked again, whatever else about the screen changes. Without it, ``verify(settings)``
+    # runs whenever anything in a screen's settings is new.
+    verify_parts: Callable[[dict], list] | None = None
     # Dashboard hints. ``basic``: the few settings most people change, shown up front; the rest
     # go under "Advanced settings". Leave it empty to show everything. ``item_fields``: for a
     # list-of-entries setting, the fields of one entry, so it gets a form instead of raw JSON:
@@ -107,6 +113,11 @@ class Module:
     # ``suggestions={"feeds": [{"name": "BBC Top Stories", "value": "https://...", "group": "BBC"}]}``:
     # ready-made values for a list setting, offered as one-tap "Quick add" picks in the dashboard.
     suggestions: dict = field(default_factory=dict)
+    # ``word_filters={"feeds": "/api/rss/filtered"}``: each entry of that list setting may carry word filters: it is
+    # then saved as {"url": the entry, "only": "words, ...", "never": "words, ..."} in place of the plain entry (both
+    # forms are valid; the module's ``check`` and its own code read either). The dashboard shows the two boxes under
+    # each entry and asks that route (POST {name: the list}) how many get through.
+    word_filters: dict = field(default_factory=dict)
     # ``choice_names={"holidays": {"labels": {"eid_al_fitr": "Eid al-Fitr"}, "groups": {"eid_al_fitr": "Islamic"}}}``:
     # how the dashboard words a choice setting's values, and the headings it groups them under.
     choice_names: dict = field(default_factory=dict)

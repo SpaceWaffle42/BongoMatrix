@@ -62,7 +62,7 @@ See [docs/MODULES.md](docs/MODULES.md) to write a module and
 | Text | static, scroll | Your own message, centred or scrolling. |
 | Media | fit, fill, pixel | Images, animated GIFs and short videos (first 15 s, needs `ffmpeg`) from the media library; `pixel` scales pixel art crisply. |
 | Announcements | banner, card, flash | Notices scheduled by date, weekday and hour; several rotate. |
-| News | ticker, headline, picture | Headlines from RSS/Atom feeds, newest first; `picture` shows the story's thumbnail beside it. A feed must be an http(s) address that really serves RSS or Atom; the dashboard checks new feeds when you save. |
+| News | ticker, headline, picture | Headlines from RSS/Atom feeds, newest first; `picture` shows the story's thumbnail beside it. A feed must be an http(s) address that really serves RSS or Atom; the dashboard checks new feeds when you save. Each feed can have word filters: only stories that mention, and never show stories that mention, the words or phrases you list. |
 | Calendar | Today: page, desk, date_line, week · Month: month, numbers, dots, year · Progress: progress, rings, weeks, percent · Countdown: countdown_days, countdown_clock, countdown_flip, countdown_ring, countdown_tearoff | One list of your dates (once, every year or a holiday; time, message, icon, colour) shown on the calendar looks; the countdowns count down to the soonest (or, with none, the next ticked holiday). The Countdown module moved in on 12 Nov 2026: saved entries move over by themselves. |
 | Pet | life, idle, eating, napping, playing, zoomies, … | Mochi the cat (your Cat 10 art) in her room. Life plays the ticked modes through the day; the `wander` overlay walks her across other screens. Name her in Settings. |
 | Sky | moon, sun | Moon phase and next full/new moon; today's sun arc with sunrise and sunset. |
@@ -109,7 +109,11 @@ display service can only write to `data/`, so it never replaces its own code: it
 request in `data/update-request.json`, and the updater (`deploy/bongo-update.path` +
 `deploy/bongo-update.service`) fetches the branch, installs it, reinstalls packages if
 `requirements.txt` changed, restarts the display and waits for the dashboard to answer. If the
-new version doesn't start, it puts the old one back. Install the updater once:
+new version doesn't start, it puts the old one back. The display also looks for a new version by
+itself, five minutes after it starts and then once a day (sooner again after a look that failed):
+nothing installs by itself, but the
+Software card says one is ready, and so does its card on the hub (`http://matrix.local`), with an
+**Update…** button that opens this card to confirm it. Install the updater once:
 
 ```bash
 sudo cp deploy/bongo-update.path deploy/bongo-update.service /etc/systemd/system/

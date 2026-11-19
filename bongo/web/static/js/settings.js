@@ -8,6 +8,8 @@ import { helpButton, creditLine } from './help.js';
 import { placePicker } from './editor.js';
 import { lookEditor, keepState, comingUpCard, icons, NAMES as COLOUR_NAMES } from './calendarlook.js';
 import { importBox, importedMore, addons } from './modimport.js';
+import { DEMO } from './api.js';
+import * as deeplink from './deeplink.js';
 
 /** The cards, by a name that never changes (their order is saved on the Matrix: config ``settings_layout``). */
 const CARDS = [['safe_area', () => safeAreaCard()], ['device', () => deviceCard()], ['modules', () => modulesCard()],
@@ -828,10 +830,45 @@ const UPDATE_WORDS = {
 };
 const UPDATE_RUNNING = new Set(['requested', 'fetching', 'installing', 'restarting']);
 
+/** Bring a card to the top of the page and keep it there while the rest of the page settles: the cards above it
+ *  load one by one and grow, on a slow Matrix for several seconds. It ends the moment you scroll, tap or press a
+ *  key (a scroll that isn't the page moving the card is yours), or leave the page. */
+function bringToTop(card) {
+  let mine = true, setY = 0, placed = 0, watch = null;
+  const where = () => card.getBoundingClientRect().top + window.scrollY;   // the card's place on the page
+  const put = () => {
+    if (!mine || !card.isConnected) return;
+    const bar = document.querySelector('.jump-bar');
+    placed = where();
+    window.scrollTo({ top: Math.max(0, placed - document.getElementById('topbar').offsetHeight - (bar?.offsetHeight || 0) - 8), behavior: 'auto' });
+    setY = window.scrollY;
+  };
+  const scrolled = () => { if (mine && Math.abs(window.scrollY - setY) > 2 && Math.abs(where() - placed) < 1) stop(); };   // you moved, not the card
+  const timers = [150, 500, 1200, 2500, 5000, 9000].map((ms) => setTimeout(put, ms));   // (a browser with no ResizeObserver)
+  function stop() {
+    mine = false;
+    watch?.disconnect(); timers.forEach(clearTimeout);
+    window.removeEventListener('scroll', scrolled);
+    for (const ev of ['wheel', 'touchstart', 'pointerdown', 'keydown']) window.removeEventListener(ev, stop);
+  }
+  for (const ev of ['wheel', 'touchstart', 'pointerdown', 'keydown']) window.addEventListener(ev, stop, { passive: true });
+  window.addEventListener('scroll', scrolled, { passive: true });
+  if (window.ResizeObserver) {   // told before the page is drawn again, so the card never visibly jumps
+    watch = new ResizeObserver(put);
+    watch.observe(card.closest('.view-part') || document.body);
+  }
+  put();
+  onLeave(stop);
+}
+
 function updateCard() {
   const card = h('section', { class: 'card stack', 'aria-label': 'Software' }, h('h2', { class: 'h2' }, 'Software'),
     h('p', { class: 'muted small flush' }, 'Loading…'));
   let info = null, poll = null;
+  // Opened by the hub's Update… link (/settings#update): the page goes straight to this card, and if a new version
+  // is ready the card asks to confirm it (deeplink.js). Not now, or starting the update, ends that
+  let asked = deeplink.asked(location.hash, DEMO), arrived = false;
+  let focusNext = false;   // the question has just gone (Not now, Update now): focus moves to the card's first button
   const stopPoll = () => { clearTimeout(poll); poll = null; };
   onLeave(stopPoll);
 
@@ -840,6 +877,7 @@ function updateCard() {
     try { info = await get('/api/update'); }
     catch (err) { if (!quiet) card.replaceChildren(card.firstChild, h('p', { class: 'danger small' }, `Couldn't read the version: ${err.message}`)); return; }
     paint();
+    if (asked && !arrived) { arrived = true; bringToTop(card); }
     const st = info.status?.state;
     stopPoll();
     if (UPDATE_RUNNING.has(st)) poll = setTimeout(() => refresh(true), 3000);  // the Matrix restarts mid-update: keep asking
@@ -848,9 +886,11 @@ function updateCard() {
   function paint() {
     const v = info.version, st = info.status;
     const running = st && UPDATE_RUNNING.has(st.state);
+    // the card is drawn again every 3 s while an update runs: whatever had the focus has it again afterwards
+    const held = card.contains(document.activeElement) ? (document.activeElement.dataset.key || document.activeElement.id || null) : null;
     const result = h('p', { class: 'small flush', 'aria-live': 'polite' });
-    const check = h('button', { type: 'button', class: 'btn' }, 'Check for updates');
-    const pull = h('button', { type: 'button', class: 'btn primary', disabled: running || null }, running ? 'Updating…' : 'Pull update');
+    const check = h('button', { type: 'button', class: 'btn', 'data-key': 'check' }, 'Check for updates');
+    const pull = h('button', { type: 'button', class: 'btn primary', 'data-key': 'pull', disabled: running || null }, running ? 'Updating…' : 'Pull update');
     check.onclick = async () => {
       check.disabled = true; result.className = 'small flush muted'; result.textContent = 'Checking…';
       try {
@@ -860,13 +900,55 @@ function updateCard() {
       } catch (err) { result.className = 'small flush danger'; result.textContent = err.message; }
       check.disabled = false;
     };
-    pull.onclick = async () => {
-      if (!confirm('Pull the latest version and restart the Matrix? The panel and this page go quiet for about a minute. If the new version won\'t start, the old one comes back by itself.')) return;
+    const start = async () => {   // (one way to start an update, whichever button asked)
       try { await post('/api/update'); toast('Update started', 'success'); refresh(); }
       catch (err) { toast(err.message, 'error'); }
     };
+    pull.onclick = async () => {
+      if (!confirm('Pull the latest version and restart the Matrix? The panel and this page go quiet for about a minute. If the new version won\'t start, the old one comes back by itself.')) return;
+      start();
+    };
     const stLine = st ? h('p', { class: 'small flush ' + (st.state === 'rolled_back' || st.state === 'failed' ? 'danger' : running ? 'warn' : 'muted') },
       `${UPDATE_WORDS[st.state] || st.state}: ${st.message} · ${when(st.at)}`) : null;
+    const ready = asked ? deeplink.ready(info, S.state?.name) : null;
+    if (ready) {   // from the hub's Update…: just the question. Update now does what Pull update does; Not now leaves the usual card
+      const now = h('button', { type: 'button', class: 'btn primary' }, 'Update now');
+      const later = h('button', { type: 'button', class: 'btn' }, 'Not now');
+      const line = h('p', { class: 'flush', id: 'update-ready', tabindex: '-1', style: 'outline:none' }, ready.line);   // (focused below, never by Tab)
+      const trouble = h('p', { class: 'danger small flush', role: 'alert', hidden: true });
+      now.onclick = async () => {
+        line.focus({ preventScroll: true });   // (a disabled button can't keep the focus)
+        now.disabled = later.disabled = true; now.textContent = 'Starting…'; trouble.hidden = true;
+        // the question (and #update on the address) stays until the Matrix has accepted the update: see deeplink.js
+        const went = await deeplink.updateNow(post, get);
+        if (went.unpaired || !card.isConnected) return;   // off to pair again (and back to this question), or the page has gone
+        if (went.done) {   // under way: the usual card shows its progress
+          asked = false; focusNext = true;
+          if (went.mine) toast('Update started', 'success');
+          await refresh();
+          if (focusNext) { focusNext = false; const head = card.querySelector('h2'); head.tabIndex = -1; head.style.outline = 'none'; head.focus({ preventScroll: true }); }   // (it couldn't be read)
+          return;
+        }
+        now.disabled = later.disabled = false; now.textContent = 'Update now';
+        trouble.textContent = went.why; trouble.hidden = false;   // why, here in the card, and the buttons are back to try again
+        now.focus({ preventScroll: true });
+      };
+      later.onclick = () => { asked = false; deeplink.forget(); focusNext = true; paint(); };
+      card.replaceChildren(...[
+        h('h2', { class: 'h2' }, 'Software'),
+        line,
+        st && (st.state === 'rolled_back' || st.state === 'failed') ? stLine : null,   // the last try, if it went wrong
+        h('div', { class: 'row gap-s wrap', role: 'group', 'aria-labelledby': 'update-ready' }, now, later),
+        trouble,
+        h('p', { class: 'muted small flush' }, ready.note)].filter(Boolean));
+      line.focus({ preventScroll: true });   // read out by a screen reader; Tab goes on to Update now
+      return;
+    }
+    if (info.known?.available === true && typeof info.known.latest === 'string' && !running) {   // what the daily look found
+      result.className = 'small flush warn'; result.textContent = `A new version is ready (${info.known.latest.slice(0, 8)}).`;
+    } else if (asked && info.known?.available === false && !running) {   // the hub was a moment behind: nothing to do
+      result.className = 'small flush muted'; result.textContent = 'You have the latest version.';
+    }
     card.replaceChildren(...[
       h('h2', { class: 'h2' }, 'Software'),
       h('div', { class: 'stack-xs' },
@@ -876,6 +958,11 @@ function updateCard() {
       stLine,
       h('div', { class: 'row gap-s wrap' }, check, pull), result,
       sourceBox()].filter(Boolean));  // no status line until the first update
+    if (focusNext) { focusNext = false; check.focus({ preventScroll: true }); }   // (not left on nothing when the question goes)
+    else if (held) {
+      const again = card.querySelector(`[data-key="${held}"]`) || [...card.querySelectorAll('[id]')].find((el) => el.id === held);
+      (again && !again.disabled ? again : check).focus({ preventScroll: true });   // (Pull update is off while one runs)
+    }
   }
 
   function sourceBox() {
@@ -893,8 +980,8 @@ function updateCard() {
       const ok = await saveConfig({ update: isDefault ? null : { url: u, branch: b } }, 'Update source');
       if (ok) refresh(true);
     };
-    return h('details', { class: 'item-more' },
-      h('summary', null, 'Advanced: update source'),
+    return h('details', { class: 'item-more', open: card.querySelector('details')?.open || null },   // (stays open across a redraw)
+      h('summary', { 'data-key': 'source' }, 'Advanced: update source'),
       h('div', { class: 'stack-s' },
         h('p', { class: 'small flush warn' }, 'Only change this if you know why. Updates from this address run on the Matrix with full access.'),
         h('label', { class: 'field-col', for: url.id }, 'Repository address', url),

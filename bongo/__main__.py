@@ -230,6 +230,14 @@ def main(argv=None) -> int:
 
         addons.register(modules)   # imported modules (Settings > Modules > Import): each runs in its own child process
         addons.keep_checking()     # ...and a look for newer versions once a day (nothing installs by itself)
+        try:   # the same for the Matrix's own software: the Software card and the hub say when one is ready
+            from pathlib import Path
+
+            from bongo import update as updates
+
+            updates.keep_checking(lambda: cfg.load(args.config), Path(args.config).parent)
+        except Exception as error:
+            logging.warning("the daily look for a new version didn't start: %s", error)
         import atexit
         atexit.register(remote.stop_all)
 
@@ -248,7 +256,7 @@ def main(argv=None) -> int:
             return 0 if result["state"] in ("updated", "up_to_date") else 1
         url, branch = update.source(config)
         here, there = update.version(), update.latest(url, branch)
-        print(f"running {here['short'] if here else 'unknown'}; {branch} at {url} is {there[:8]}")
+        print(f"running {here['short'] if here else 'unknown'}; {branch} at {update.shown(url)} is {there[:8]}")
         return 0
 
     if args.command == "preview":

@@ -5,6 +5,7 @@ import { FrameLoop } from './led.js';
 import { openPreview } from './mediaview.js';
 import { helpButton, troubleNote } from './help.js';
 import { iconPicker } from './iconpick.js';
+import { feedFilters } from './feedfilters.js';
 import { S, onLeave, go, href, path, moduleById, styleOf, entryName, applyDraft, draftChanged, matrixClock, problemOf, problemLine } from './app.js';
 import { MOST_TIMES, mins, valid, joined, sentence, sleepTime, meetsSleep, suggest, moved } from './times.js';
 
@@ -301,7 +302,7 @@ export function render(view, match) {
   function fieldRow(f) {
     if (f.name === 'own_location') return null;   // it's the switch on the place row (placeRow)
     if (f.type === 'place' && Object.values(schemaFor(mod, styleOf(e))).flat().some((x) => x.name === 'own_location')) return placeRow(f);
-    const row = h('div', { class: ['items', 'palettes', 'media', 'place'].includes(f.type) || f.swatches ? 'field wide' : 'field' });
+    const row = h('div', { class: ['items', 'palettes', 'media', 'place'].includes(f.type) || f.swatches || f.word_filters ? 'field wide' : 'field' });
     const id = `f-${f.name}`;
     const cur = () => (f.name in e.settings ? e.settings[f.name] : f.default);
     const differs = () => differsFrom(f, e.settings);
@@ -483,6 +484,7 @@ function control(f, id, v, set, hooks = {}) {
     return h('div', { class: 'row gap-s wrap' }, t, auto ? h('span', { class: 'muted small' }, 'Worked out automatically')
       : numberInput({ ...f, type: 'number' }, `${id}-n`, v, set, `${humanize(f.name)} value`));
   }
+  if (T === 'list' && f.word_filters) return feedFilters(f, id, v, set, chips);   // News feeds: the list, and each feed's word filters
   if (T === 'list' && Array.isArray(f.default) && f.default.length && f.default.every((x) => typeof x === 'string')) return chips(f, id, v, set);
   return jsonArea(f, id, v, set);
 }

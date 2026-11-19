@@ -146,9 +146,17 @@ class _News(Scrolls, Style):
 
     TROUBLE_SECONDS = 5
     # what to say, and the font to say it in, biggest first. The small fonts' W reads as an H ("NEHS"),
-    # so where they're needed the wording has no W in it.
-    SAYS = {"none": ((("ADD A", "NEWS FEED"), "6x10"), (("ADD A", "FEED"), "5x7"), (("ADD A", "FEED"), "tom-thumb")),
-            "offline": ((("NEWS", "OFFLINE"), "6x10"), (("FEED", "OFFLINE"), "5x7"), (("FEED", "OFFLINE"), "tom-thumb"))}
+    # so where they're needed the wording has no W in it. After the two-line wordings come one-line ones, for a
+    # canvas too low for two lines; on one too small even for those, nothing is written (a clean frame, never
+    # cut-off letters).
+    SAYS = {"none": ((("ADD A", "NEWS FEED"), "6x10"), (("ADD A", "FEED"), "5x7"), (("ADD A", "FEED"), "tom-thumb"),
+                     (("ADD A FEED",), "tom-thumb"), (("NO FEED",), "tom-thumb")),
+            "offline": ((("NEWS", "OFFLINE"), "6x10"), (("FEED", "OFFLINE"), "5x7"), (("FEED", "OFFLINE"), "tom-thumb"),
+                        (("OFFLINE",), "5x7"), (("OFFLINE",), "tom-thumb")),
+            # the feeds have stories, and their word filters leave none of them
+            "filtered": ((("FILTERS", "HIDE ALL"), "6x10"), (("FILTERS", "HIDE ALL"), "5x7"), (("FILTERS", "HIDE ALL"), "tom-thumb"),
+                         (("ALL", "HIDDEN"), "tom-thumb"), (("ALL HIDDEN",), "5x7"), (("ALL HIDDEN",), "tom-thumb"),
+                         (("HIDDEN",), "5x7"), (("HIDDEN",), "tom-thumb"))}
     LOADING = (("NEWS", "6x10"), ("FEED", "5x7"), ("FEED", "tom-thumb"))   # the same rule while it's fetching
 
     def summary(self, item) -> str:
@@ -157,7 +165,7 @@ class _News(Scrolls, Style):
     def pick(self, items, now, seconds):
         """(item, seconds into it): stories take turns, each for ``seconds(item)``. A screen starts on the
         story after the one the last news screen was showing, and stays until the one it's on is read."""
-        return self.turns(("news", tuple(self.settings["feeds"])), items, now, seconds, name=lambda i: i.title)
+        return self.turns(("news", tuple(data.filters.entries(self.settings["feeds"]))), items, now, seconds, name=lambda i: i.title)
 
     def lines(self, font, text, width):
         """Wrapped lines, cached: spans are worked out every frame."""
@@ -175,9 +183,9 @@ class _News(Scrolls, Style):
             img, w, h = self.backdrop.copy(), self.ctx.width, self.ctx.height
             # the first wording whose font leaves two clear columns each side and a clear row above and below
             lines, font = next(((lines, f) for lines, name in self.SAYS[trouble] for f in (self.ctx.fonts(name),)
-                                if max(f.width(line) for line in lines) <= w - 3 and 2 * f.cap + 5 <= h),
-                               (self.SAYS[trouble][-1][0], self.tiny))
-            base = middle(font, h, lines=2, gap=3 - font.descent)
+                                if max(f.width(line) for line in lines) <= w - 3 and len(lines) * (f.cap + 3) - 1 <= h),
+                               ((), self.tiny))                 # (none fits: say nothing)
+            base = middle(font, h, lines=2, gap=3 - font.descent) if len(lines) == 2 else (h - font.cap) // 2 + font.cap   # (capitals: no tails to leave room for)
             for i, line in enumerate(lines):
                 font.draw(img, (w - font.width(line) + 1) // 2, base + i * (font.cap + 3), line,   # (+1: a glyph ends in a blank column)
                           self.accent if i == 0 else self.text)

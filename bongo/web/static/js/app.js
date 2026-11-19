@@ -1,6 +1,7 @@
 // Shell: shared state, routing, header/nav, polling and the playlist draft.
 import { DEMO, hooks, get, put } from './api.js';
 import { h, icon, toast, fail, clone, same, humanize } from './ui.js';
+import { afterPairing } from './deeplink.js';
 
 /** Shared state. `draft` is the locally edited playlist; `config.playlist` is what the Matrix has. */
 export const S = { state: null, config: null, modules: null, draft: null, problems: [], online: true, polledAt: 0,
@@ -46,7 +47,7 @@ export function go(p, { replace = false } = {}) {
   if (S.stale && !DEMO && !dirtyCount()) { location.assign(p); return; }   // updated since this page loaded: the next page comes fresh
   if (DEMO) { replace ? location.replace(`#${p}`) : (location.hash = p); return; } // hashchange renders
   history[replace ? 'replaceState' : 'pushState'](null, '', p);
-  shownAt = p;
+  shownAt = path();   // (p may end in a #part: /settings#update, back from pairing)
   render();
 }
 
@@ -342,9 +343,11 @@ window.addEventListener('drop', (ev) => { if (draggingFiles(ev)) ev.preventDefau
 hooks.unauthorized = () => {
   if (path() === '/pair') return;
   S.config = null;
-  sessionStorageSet('bongo.after', path());
+  sessionStorageSet('bongo.after', whereNow());
   go('/pair', { replace: true });
 };
+/** Where to come back to after pairing: this page and its #part (the hub's Update… link is /settings#update). */
+const whereNow = () => afterPairing(path(), location.hash, DEMO);
 function sessionStorageSet(k, v) { try { sessionStorage.setItem(k, v); } catch { /* ignore */ } }
 
 document.getElementById('draft-apply').addEventListener('click', applyDraft);
@@ -361,7 +364,7 @@ if (DEMO) document.getElementById('demo-badge').hidden = false;
 (async function boot() {
   try {
     const { paired } = await get('/api/pair/status');
-    if (!paired && path() !== '/pair') { sessionStorageSet('bongo.after', path()); go('/pair', { replace: true }); poll(); return; }
+    if (!paired && path() !== '/pair') { sessionStorageSet('bongo.after', whereNow()); go('/pair', { replace: true }); poll(); return; }
     if (paired && path() === '/pair') history.replaceState(null, '', DEMO ? '#/' : '/');   // paired already: nothing to do there
   } catch (err) {
     showOffline(document.getElementById('view'), err);

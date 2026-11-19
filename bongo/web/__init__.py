@@ -88,9 +88,23 @@ def _entries(config: dict):
 def verify_new(current: dict, merged: dict, modules: dict) -> list[str]:
     """Run modules' slow checks (e.g. "is this really an RSS feed?") on entries whose settings are
     new in this save. Unchanged entries aren't re-checked, so a feed being down for a while
-    doesn't stop you saving something else."""
+    doesn't stop you saving something else. A module with ``verify_parts`` is asked only about the
+    parts (its feeds' addresses) that no screen of its in the saved config has: changing anything
+    else about a screen checks nothing, and a part accepted before is never checked again."""
     key_of = lambda e: (e.get("module"), e.get("style"), json.dumps(e.get("settings") or {}, sort_keys=True))
     seen = {key_of(e) for _, e in _entries(current)}
+    accepted: dict[str, set] = {}   # module id -> the parts its screens in the saved config have
+
+    def had(module) -> set:
+        if module.id not in accepted:
+            parts = accepted[module.id] = set()
+            for _, e in _entries(current):
+                if e.get("module") == module.id:
+                    try:
+                        parts.update(module.verify_parts(module.settings_for(e.get("style"), e.get("settings") or {})))
+                    except (ValueError, TypeError):   # a saved screen that's wrong already: nothing of it counts
+                        pass
+        return accepted[module.id]
     jobs = {}
     for where, e in _entries(merged):
         module = modules.get(e.get("module"))
@@ -101,7 +115,12 @@ def verify_new(current: dict, merged: dict, modules: dict) -> list[str]:
     for where, (mid, style, settings) in jobs.items():
         module = modules[mid]
         merged_settings = module.settings_for(style, json.loads(settings))   # (its style: a setting only it has)
-        problems += [f"{where}: {p}" for p in module.verify(merged_settings)]
+        if module.verify_parts:
+            new = [p for p in dict.fromkeys(module.verify_parts(merged_settings)) if p not in had(module)]
+            had(module).update(new)   # (the same new part on two screens is checked once)
+            problems += [f"{where}: {p}" for p in module.verify(merged_settings, new)] if new else []
+        else:
+            problems += [f"{where}: {p}" for p in module.verify(merged_settings)]
     return problems
 
 
@@ -266,11 +285,25 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         if picture and live.frame_png(public=True) is None:
             warnings.append("No picture yet")
         return jsonify(id=netname.mac_suffix(), name=config.get("name") or netname.DEFAULT_NAME, version=__version__,
+                       **software(config),   # which build, and whether a newer one is ready: for the hub's Update… button
                        playing=label(entry["module"], entry.get("style")) if entry.get("module") else None,
                        paused=status.get("paused", False), sleeping=bool(status.get("asleep")),
                        uptime=round(time.time() - started), warnings=warnings, picture=picture,
                        badge=logo.badge_colour(config["web"].get("badge"), netname.mac_suffix()),
                        panel={"width": cfg.safe_area(config).panel_width, "height": cfg.safe_area(config).panel_height})
+
+    software_failed = []
+
+    def software(config) -> dict:
+        """The build and "an update is ready" for the public card: only what the Matrix already knows from its
+        own daily look (bongo/update.py); the hub asking never makes it look. Left out if it can't be read."""
+        try:
+            return update.public(config, Path(config_path).parent)
+        except Exception as error:   # the card matters more than this line on it
+            if not software_failed:
+                software_failed.append(1)
+                logging.getLogger("bongo.update").warning("couldn't tell the hub about updates: %s", update.logged(error))
+            return {}
 
     @app.get("/api/public/frame.png")
     def public_frame():
@@ -722,6 +755,21 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         key.forget()
         return weather_status()
 
+    # -- News word filters (bongo/modules/rss/filters.py): what gets through, from the feeds already fetched ----
+    @app.post("/api/rss/filtered")
+    def rss_filtered():
+        """How many of each feed's stories get through its filters, and the headlines left out. A POST so that
+        feed addresses and words stay out of URLs; it changes nothing and fetches nothing."""
+        from bongo.modules.rss import data
+        feeds = body().get("feeds")
+        try:
+            if isinstance(feeds, list) and len(feeds) > 50:
+                raise ValueError("that's too many feeds to count at once")
+            data.check_urls({"feeds": feeds})
+        except ValueError as error:
+            return jsonify(error=str(error)), 422
+        return jsonify(data.filtered(feeds))
+
     @app.post("/api/push")
     def push():
         data = body()
@@ -1093,9 +1141,11 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
 
     @app.get("/api/update")
     def update_info():
-        url, branch = update.source(load())
+        config = load()
+        url, branch = update.source(config)
         return jsonify(version=update.version(), url=url, branch=branch, status=update.status(data_dir),
-                       default_url=update.DEFAULT_URL, default_branch=update.DEFAULT_BRANCH)
+                       default_url=update.DEFAULT_URL, default_branch=update.DEFAULT_BRANCH,
+                       known=update.known(config, data_dir))   # the last look's answer: nobody is asked here
 
     @app.post("/api/update/check")
     def update_check():
@@ -1104,7 +1154,12 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         try:
             newest = update.latest(url, branch)
         except Exception as error:  # offline, wrong address, no such branch...
-            return jsonify(error=f"Couldn't reach the update source: {error}"), 502
+            logging.getLogger("bongo.update").info("Check for updates failed: %s", update.logged(error))   # (git's own words, scrubbed)
+            return jsonify(error=f"Couldn't check for updates: {update.why(error)}."), 502   # (plain words: never the address)
+        try:
+            update.note(newest, url, branch, data_dir)   # so the card (and the hub) know it without asking again
+        except OSError as error:
+            logging.getLogger("bongo.update").info("couldn't note the newest version: %s", update.logged(error))
         return jsonify(latest=newest, current=here and here["commit"], available=not here or newest != here["commit"])
 
     @app.post("/api/update")

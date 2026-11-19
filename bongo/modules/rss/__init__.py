@@ -1,5 +1,8 @@
 """News from RSS 2.0 / Atom feeds. The headline and the story text have their own colours, so
-you can always tell which one you're reading. Four styles share the feeds and colours."""
+you can always tell which one you're reading. Four styles share the feeds and colours.
+
+A feed is its address, or ``{"url": address, "only": "words, ...", "never": "words, ..."}`` when it
+has word filters (filters.py): both forms load, so a feed saved before filters existed is unchanged."""
 from bongo.module import Module
 
 from . import data
@@ -29,13 +32,15 @@ MODULE = Module(
         headline_colour="#FFD27A", summary_colour="#B8C7DC", accent="#FFB547",
         background_top="#101216", background_bottom="#060708",
     ),
-    check=data.check_urls,   # every feed is an http(s) address
+    check=data.check_urls,   # every feed is an http(s) address (and its filters, if any, are two boxes of words)
     verify=data.verify,      # and, when saved from the dashboard, really is RSS or Atom
+    verify_parts=data.urls,  # ...asked once for each address that's new: not again when words or colours change
     basic=("feeds", "show_summary", "headline_colour", "summary_colour"),
     limits={"max_items": (1, 100), "refresh_minutes": (5, 1440), "rotate_seconds": (1, 3600), "scroll_speed": (1, 200),
             "text_speed": (1, 100)},
     marks={"text_speed": [[v, name.capitalize()] for name, v in TEXT_SPEEDS.items()]},   # Story and Picture
     migrate=migrate,
     suggestions={"feeds": FEEDS},  # one-tap feeds in the dashboard (v2's presets and more)
+    word_filters={"feeds": "/api/rss/filtered"},  # each feed's Only and Never show boxes, and where their counts come from
     help=HELP,
 )

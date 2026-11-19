@@ -9,6 +9,9 @@ There is no extra box: each Matrix can be the hub, and they agree which one is.
   the next longest-running one takes over within about a minute.
 - The hub asks every Matrix for its public card (``/api/public``: name, what's playing, version,
   warnings) and serves the hub page with one card each, a live picture and an **Open dashboard** link.
+- A card whose Matrix says a new version is ready has an **Update…** link too. It only opens that
+  Matrix's own dashboard at Settings > Software (``/settings#update``), where the update is confirmed:
+  the hub itself never updates anything.
 
 Read-only on purpose: the hub can't change anything, and each Matrix still pairs on its own. The
 cards show nothing private (no settings, feeds or messages): anyone on the same Wi-Fi can see them.
@@ -22,6 +25,7 @@ import asyncio
 import ipaddress
 import json
 import logging
+import re
 import socket
 import threading
 import time
@@ -71,6 +75,7 @@ def version_key(v: str) -> tuple:
     return tuple(parts)
 
 
+BUILD = re.compile(r"[0-9a-f]{7,12}")   # a short commit, as Settings > Software shows it
 BADGES = ("blue", "red", "tan", "pink", "yellow", "green")   # bongo.logo.COLOURS (kept here so the hub needs no pictures)
 
 
@@ -86,6 +91,12 @@ def clean_card(raw) -> dict:
             "sleeping": bool(raw.get("sleeping")),
             "picture": raw.get("picture") is not False,   # False: its owner turned the hub picture off
             "badge": raw.get("badge") if raw.get("badge") in BADGES else None,   # its logo's colour (older builds send none)
+            # its build, and what its own daily look for a new version found (bongo/update.py public). Older
+            # builds send none of these: None, and the page shows what it always showed
+            "build": raw["build"] if isinstance(raw.get("build"), str) and BUILD.fullmatch(raw["build"]) else None,
+            "update": raw["update"] if isinstance(raw.get("update"), bool) else None,
+            "updating": raw.get("updating") is True,
+            "rolled_back": raw.get("rolled_back") is True,   # the update on offer was tried and wouldn't start
             "warnings": [str(w)[:80] for w in warnings[:5]] if isinstance(warnings, list) else []}
 
 

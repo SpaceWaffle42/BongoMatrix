@@ -3,6 +3,7 @@ import { DEMO, get, post } from './api.js';
 import { h, toast, store } from './ui.js';
 import { S, go } from './app.js';
 import { drawLed } from './led.js';
+import { UPDATE, safeAfter } from './deeplink.js';
 
 /** A 64x32 picture of what the panel shows while pairing: PAIR over six blank digits. */
 function pairFrame() {
@@ -23,6 +24,11 @@ function guessName() {
   const what = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android phone'
     : /Mac/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows PC' : /Linux/.test(ua) ? 'Linux computer' : 'Browser';
   return store.get('deviceName', what);
+}
+
+/** Sent here by the hub's Update… link (this browser hadn't paired with this Matrix yet)? */
+function forUpdate() {
+  try { return (sessionStorage.getItem('bongo.after') || '').endsWith(UPDATE); } catch { return false; }
 }
 
 export function render(view) {
@@ -86,6 +92,7 @@ export function render(view) {
       h('div', { class: 'pin-row' }, boxes.slice(0, 3), h('span', { class: 'pin-gap', 'aria-hidden': 'true' }, '–'), boxes.slice(3)),
       h('span', { class: 'muted small' }, 'Pasting the full PIN fills every box.')),
     h('label', { class: 'field-col', for: 'pair-name' }, 'Name this device', name),
+    forUpdate() ? h('p', { class: 'muted small flush' }, 'After pairing, the update is ready to confirm.') : null,
     error, submit,
     h('div', { class: 'pair-alt' }, h('span', null, 'PIN gone from the panel?'), showBtn), showNote);
 
@@ -101,7 +108,7 @@ export function render(view) {
       let after = '/';
       try { after = sessionStorage.getItem('bongo.after') || '/'; sessionStorage.removeItem('bongo.after'); } catch { /* ignore */ }
       S.config = null; S.draft = null;
-      go(after === '/pair' ? '/' : after, { replace: true });
+      go(safeAfter(after), { replace: true });   // (only ever a page of this dashboard)
     } catch (err) {
       error.textContent = err.status === 403 ? err.message : `Couldn't pair: ${err.message}`;
       error.hidden = false;

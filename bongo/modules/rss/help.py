@@ -21,5 +21,7 @@ HELP = {
         "A Reddit community: its address with `/.rss` on the end, like "
         "`https://www.reddit.com/r/worldnews/.rss`",
         "Feeds behind a login or a paywall won't work, and some sites don't offer a feed at all.",
+        "Too much of one thing, or only after local news? Each feed has filters under the list of feeds: Only "
+        "stories that mention, and Never show stories that mention, the words or phrases you type there.",
     ],
 }

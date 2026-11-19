@@ -151,6 +151,7 @@ def describe(module) -> dict:
             return {"type": kind(d)}
         return [{"name": n, "default": d, **typed(n, d), "advanced": tiered and n not in basic,
                  **({"note": module.notes[n]} if n in module.notes else {}),
+                 **({"word_filters": module.word_filters[n]} if n in module.word_filters else {}),
                  **({"marks": [list(m) for m in module.marks[n]]} if n in module.marks else {})}
                 for n, d in defaults.items()]
     shared_choices = module.choices
