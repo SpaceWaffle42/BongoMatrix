@@ -340,4 +340,6 @@ MODULE = Module(
     basic=("skip_when_not_playing", "hand_over_after"),
     limits={"hand_over_after": (0, 3600)},
     check=check,
+    # (said when a backup is restored: the sign-in is never in one)
+    needs=lambda settings: None if account.connected() else "Spotify's sign-in: sign in again in Settings › Spotify",
 )

@@ -91,17 +91,21 @@ export function importBox(done) {
   function review() {
     const m = job.manifest, mine = run;
     title.textContent = job.updating ? `Update ${m.name} to ${m.version}` : m.name;
-    const trust = h('input', { type: 'checkbox', class: 'check', id: 'import-trust', 'aria-describedby': m.sites.length ? 'import-risk' : null });
+    const asks = job.abilities || [];   // what it asks for beyond drawing its screens (bongo/abilities.py), in plain words
+    const home = asks.some((a) => a.key === 'home_address');
+    const trust = h('input', { type: 'checkbox', class: 'check', id: 'import-trust',
+      'aria-describedby': [asks.length ? 'import-asks' : '', m.sites.length ? 'import-risk' : ''].filter(Boolean).join(' ') || null });
     const install = h('button', { type: 'button', class: 'btn primary', disabled: true }, job.updating ? 'Update' : 'Install');
     trust.onchange = () => { install.disabled = !trust.checked; };
     install.onclick = async () => {
       install.disabled = true; saving = true;
       const updating = job.updating;
       try {
-        const res = await post('/api/addons/install', { token: job.token, trust: true, author: m.author });
+        const screens = job.styles.length > 0;
+        const res = await post('/api/addons/install', { token: job.token, trust: true, author: m.author, abilities: asks.map((a) => a.key) });
         if (mine !== run) return;
         job = null; run += 1; panel.hidden = true; button.setAttribute('aria-expanded', 'false');
-        toast(updating ? `${res.name} updated` : `${res.name} installed. It's in Add a module now.`, 'success');
+        toast(updating ? `${res.name} updated` : screens ? `${res.name} installed. It's in Add a module now.` : `${res.name} installed. Its settings are under Modules.`, 'success');
         done(res.installed);
       } catch (e) { toast(said(e.message), 'error', 8000); install.disabled = !trust.checked; }
       finally { saving = false; }
@@ -114,25 +118,34 @@ export function importBox(done) {
       ? "It's code that runs on this computer. This computer can't keep it apart from the rest, so here it could see your settings and files and reach any site."
       : job.only_listed === false
         ? "It's code that runs on your Matrix. It runs on its own, apart from the rest: it can't see your settings, linked calendars or other files. You've let this module reach any site, and your home network; that stays as it is."
-        : "It's code that runs on your Matrix. It runs on its own, apart from the rest: it can't see your settings, linked calendars or other files, and it can only reach the sites listed above, never your home network.";
+        : home
+          ? "It's code that runs on your Matrix. It runs on its own, apart from the rest: it can't see your settings, linked calendars or other files. It can only reach the sites listed above, and of your home network only the one device you name in its settings."
+          : "It's code that runs on your Matrix. It runs on its own, apart from the rest: it can't see your settings, linked calendars or other files, and it can only reach the sites listed above, never your home network.";
+    const askList = asks.length ? h('div', { class: 'stack-s', id: 'import-asks' },
+      h('strong', { class: 'small' }, 'It also asks to:'),
+      h('ul', { class: 'ask-list' }, asks.map((a) => h('li', null, h('span', { class: 'small' }, a.title),
+        a.detail ? h('span', { class: 'tiny muted' }, a.detail) : null)))) : null;
     body.replaceChildren(h('div', { class: 'import-review' },
-      h('div', { class: 'min0' }, h('img', { class: 'import-preview', src: job.preview, alt: `${m.name} on a test screen` }),
-        h('p', { class: 'tiny muted flush' }, 'Drawn on this Matrix just now, on a test screen.')),
+      h('div', { class: 'min0' }, job.preview ? h('img', { class: 'import-preview', src: job.preview, alt: `${m.name} on a test screen` })
+        : h('p', { class: 'import-preview no-screen small muted flush' }, 'No screen of its own'),
+      h('p', { class: 'tiny muted flush' }, job.preview ? 'Drawn on this Matrix just now, on a test screen.' : 'It works in the background: there is nothing to draw.')),
       h('div', { class: 'stack-s min0' },
         m.description ? h('p', { class: 'small flush' }, m.description) : null,
         h('dl', { class: 'import-facts' },
           h('dt', null, 'Made by'), h('dd', null, m.author),
           h('dt', null, 'Version'), h('dd', null, m.version),
           h('dt', null, 'From'), h('dd', null, from),
-          h('dt', null, 'Looks'), h('dd', null, `${job.styles.length} (${job.styles.map(humanize).join(', ')})`),
+          h('dt', null, 'Looks'), h('dd', null, job.styles.length ? `${job.styles.length} (${job.styles.map(humanize).join(', ')})` : 'None'),
           h('dt', null, 'Sites it can reach'), h('dd', null, sites)))),
       ...(m.sites.some((x) => x.startsWith('*.')) ? [h('p', { class: 'error-box' }, `A site starting “*.” means any name under it: ${m.sites.filter((x) => x.startsWith('*.')).map((x) => x.slice(2)).join(', ')}. Only trust that if the whole of each belongs to one company you know.`)] : []),
       ...(job.new_sites?.length ? [h('p', { class: 'error-box' }, `This version also wants to reach: ${job.new_sites.join(', ')}`)] : []),
+      askList,
+      ...(job.new_abilities?.length ? [h('p', { class: 'error-box' }, `New in this version, it asks to: ${job.new_abilities.map((a) => a.title.charAt(0).toLowerCase() + a.title.slice(1)).join('; ')}.`)] : []),
       h('div', { class: 'note' }, icon('info'), h('div', null, apart)),
       ...(m.sites.length ? [h('p', { class: 'small flush', id: 'import-risk' }, h('strong', null, 'Shared-service risk: '),
         "if a module lists a big service that many websites share, it may also reach those other websites. The Matrix can't tell them apart.")] : []),
       h('label', { class: 'row gap-s', for: 'import-trust', style: 'align-items:flex-start' }, trust,
-        h('span', { class: 'small' }, m.sites.length ? `I trust ${m.author} and accept the shared-service risk. It's their code that will run.` : `I trust ${m.author}. It's their code that will run.`)),
+        h('span', { class: 'small' }, `I trust ${m.author}${m.sites.length ? ' and accept the shared-service risk' : ''}. It's their code that will run${asks.length ? ', and it may do what is listed above' : ''}.`)),
       h('div', { class: 'row end gap-s wrap' }, install));
     title.focus();
   }
@@ -159,7 +172,12 @@ export function importedMore(m, info, changed, onUpdate) {
   const uses = [...(S.config.playlist || []), ...(S.config.overlays || [])].filter((e) => e.module === m.id).length;
   const meta = h('span', { class: 'muted tiny', style: 'overflow-wrap:anywhere' }, `${info.version} · by ${info.author}${info.source ? ` · from ${sourceText(info.source)}` : ''}`,
     info.only_listed ? null : h('span', { class: 'tag amber' }, 'Any site'));
-  const box = h('details', { class: 'item-more', 'data-key': `addon:${m.id}` }, h('summary', null, 'Sites, and removing it'));
+  const asks = info.abilities || [];   // what it was allowed at import, beyond drawing its screens
+  const said = info.background ? h('span', { class: 'tiny row gap-s module-status', role: 'status', hidden: true }) : null;   // its background task's own words
+  if (said) paintStatus(said, (S.config.modules_off || []).includes(m.id) ? null : info.status);
+  const box = h('details', { class: 'item-more', 'data-key': `addon:${m.id}` }, h('summary', null, asks.length ? 'What it can do, and removing it' : 'Sites, and removing it'));
+  const can = asks.length ? h('div', { class: 'stack-s' }, h('span', { class: 'small' }, 'You let it:'),
+    h('ul', { class: 'ask-list' }, asks.map((a) => h('li', null, h('span', { class: 'small' }, a.title), a.detail ? h('span', { class: 'tiny muted' }, a.detail) : null)))) : null;
   const sitesLine = h('p', { class: 'small flush', style: 'overflow-wrap:anywhere' }, info.sites.length ? `Can reach: ${info.sites.join(', ')}` : 'Reaches no sites: it works without the internet.');
   const only = h('input', { type: 'checkbox', class: 'check', id: `only-${m.id}`, 'data-key': `only:${m.id}`, checked: info.only_listed });
   const ask = h('div', { class: 'stack-s', hidden: true });
@@ -205,14 +223,21 @@ export function importedMore(m, info, changed, onUpdate) {
     confirmRemove.replaceChildren(h('span', { class: 'small' }, uses ? `Its ${uses} screen${uses === 1 ? ' is' : 's are'} taken out of the playlist too.` : 'Remove it from this Matrix?'), no, yes);
     confirmRemove.hidden = false; remove.hidden = true; no.focus();
   };
-  box.append(h('div', { class: 'stack-s', style: 'margin-top:4px' }, sitesLine,
+  box.append(h('div', { class: 'stack-s', style: 'margin-top:4px' }, can, sitesLine,
     info.sites.length || !info.only_listed ? h('label', { class: 'row gap-s', for: `only-${m.id}`, style: 'align-items:flex-start' }, only,
       h('span', { class: 'small' }, 'Only allow the sites it lists', h('span', { class: 'tiny muted', style: 'display:block' },
-        info.only_listed ? 'On: it can reach nothing else, and never your home network.' : 'Off: it can reach any site, and your home network.'))) : null,
+        info.only_listed ? (asks.some((a) => a.key === 'home_address') ? 'On: it can reach nothing else, and of your home network only the one device named in its settings.'
+          : 'On: it can reach nothing else, and never your home network.') : 'Off: it can reach any site, and your home network.'))) : null,
     ask, blocked, h('div', { class: 'row gap-s wrap' }, remove, confirmRemove)));
   const upd = info.update ? h('button', { type: 'button', class: 'btn small-btn', style: 'align-self:flex-start', onclick: () => onUpdate(m.id, m.name) },
     `Update to ${info.update.version}`) : null;
-  return [meta, upd, box];
+  return [meta, said, upd, box];
+}
+
+/** A module's status line on its row: the square dot (green: fine; amber: something to look at) and its own words. */
+export function paintStatus(el, status) {
+  el.hidden = !status;
+  el.replaceChildren(...(status ? [h('span', { class: `dot ${status.ok ? 'ok' : 'warn'}`, 'aria-hidden': 'true' }), h('span', { style: 'overflow-wrap:anywhere' }, status.text)] : []));
 }
 
 /** The imported modules (/api/addons), once per page. */

@@ -185,7 +185,7 @@ def keep_playing(config: dict, path, modules, live, play_config, wait: float = 1
         live.reload.clear()
         live.skip.clear()
         config = cfg.load(path)
-        cfg.tidy(config, modules)
+        cfg.tidy(config, modules, path)
         logging.info("config reloaded")
 
 
@@ -239,7 +239,7 @@ def main(argv=None) -> int:
         except Exception as error:
             logging.warning("the daily look for a new version didn't start: %s", error)
         import atexit
-        atexit.register(remote.stop_all)
+        atexit.register(remote.stop_all)   # (and background.stop_all, once the panel is up: it runs first)
 
     if args.command == "list":
         for module in modules.values():
@@ -310,7 +310,7 @@ def main(argv=None) -> int:
     from bongo.player import play
 
     config = cfg.load(args.config)
-    for note in cfg.tidy(config, modules):
+    for note in cfg.tidy(config, modules, args.config):
         logging.warning("old config: %s", note)
     try:
         from bongo import media
@@ -336,6 +336,11 @@ def main(argv=None) -> int:
     import threading
     live.panel_up = True
     live.beat()   # starting up doesn't count against it
+    from bongo.sandbox import background
+    background.attach(live, modules, lambda: cfg.load(Path(args.config)))   # the controls an imported module may use
+    background.sync(config)   # ...and the background tasks of the ones switched on (each in its own child process)
+    import atexit
+    atexit.register(background.stop_all)
     threading.Thread(target=live.watch, args=(threading.Event(),), daemon=True, name="watchdog").start()
     def play_config(config, first):
         schedule = Schedule.from_config(config)

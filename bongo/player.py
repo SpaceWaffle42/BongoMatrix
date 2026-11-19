@@ -41,6 +41,12 @@ class Entry:
 FOLLOW_EVERY = 30.0   # s between looks at the brightness while a screen is up (Follow daylight: the sun has moved on)
 SAY_AGAIN = 600.0  # s before a screen that is still broken is mentioned in the log again (one line)
 OVERRUN = 120.0   # s a busy screen (a line still scrolling) may stay past its time: a backstop, never reached normally
+# A screen that says it is live (``Style.stay``) keeps the panel past its time for as long as it says so. A module
+# with a mistake in it, or one that means harm, must never hold the panel for good: each module may be kept
+# STAY_MOST seconds in any STAY_WINDOW, and when that is used up its screens hand over on time like any other.
+STAY_MOST = 4 * 3600.0
+STAY_WINDOW = 12 * 3600.0
+BACK = 1.0         # s a live screen a message cut in on is given back (kept past that only while it is still live)
 
 
 def busy(style) -> bool:
@@ -52,9 +58,26 @@ def busy(style) -> bool:
         return False
 
 
+def staying(style) -> bool:
+    """Whether a style says something is live just now, so it should keep the panel (``Style.stay``)."""
+    try:
+        return bool(getattr(style, "stay", False))
+    except Exception:   # a broken ``stay`` is a screen with nothing live: it hands over on time
+        log.exception("%s: stay failed", type(style).__name__)
+        return False
+
+
+def stay_left(spent: list, now: float) -> float:
+    """Seconds a module may still be kept (``Style.stay``), given when and how long it was before:
+    ``spent`` is its [(when it ended, seconds kept), ...] and loses what is older than STAY_WINDOW."""
+    spent[:] = [(when, seconds) for when, seconds in spent if now - when < STAY_WINDOW]
+    return max(0.0, STAY_MOST - sum(seconds for _, seconds in spent))
+
+
 def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None = None,
                clock=time.monotonic, place=None, live=None, overlays=None, hold: bool = True,
-               overrun: float = OVERRUN, until: float | None = None, lit=None, cover: bool = True) -> int:
+               overrun: float = OVERRUN, until: float | None = None, lit=None, cover: bool = True,
+               stay: float = 0.0) -> int:
     """Render one entry until its time is up; returns frames shown.
     ``place`` puts the module's safe-area frame onto the full panel (see SafeArea.place).
     ``live`` (bongo.live.Live) can skip or hold the entry and sees every frame. ``hold`` False: Pause
@@ -63,29 +86,39 @@ def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None
     ``until``: seconds to a hard end that even Pause doesn't hold (sleep starting or ending).
     ``lit(covered)``: told each frame whether a covering screen (PIN, setup, address) is up, so the panel can
     be bright enough to read it at night. ``cover`` False: none of those screens over this one (the boot
-    screen: it comes before anything else; they follow it)."""
+    screen: it comes before anything else; they follow it). ``stay``: how long past its time a style that
+    says it is live (``Style.stay``) may keep the panel (0: its time is its time); how long it did is left
+    in ``style.stayed``, and ``style.kept`` says whether it was still being kept when it ended."""
     stop = stop or threading.Event()
     frame_time = 1 / style.fps
     end = clock() + seconds
     hard = None if until is None else clock() + until
+    style.stayed, style.kept, ticked = 0.0, False, None
     try:
         style.hand_over_at = style.ctx.now().timestamp() + seconds   # (Style.hand_over_at: nothing new started after this holds it up)
     except Exception:
         pass
     shown = 0
     last, last_at = None, -1e9   # the style's latest frame: while a screen covers it, it keeps its own pace
+    preview = getattr(live, "preview", None) if cover else None   # the editor's Preview on the panel (bongo/panelpreview.py)
     while not stop.is_set():
         held = bool(hold and live and live.paused)
-        if held and getattr(style, "hand_over_at", None) is not None:
-            style.hand_over_at = None   # paused: no end in sight, so what takes turns carries on taking them
-        elif not held and hold and live and getattr(style, "hand_over_at", 0) is None:
-            try:                        # unpaused: the end is back (now, if its time has already gone)
+        kept = style.kept = bool(stay > 0 and style.stayed < stay and staying(style))   # it's live: it keeps the panel
+        if live:
+            live.staying = kept
+        if kept and not held and ticked is not None and clock() >= end:
+            style.stayed += clock() - max(ticked, end)   # (only time past its own, and not while paused)
+        ticked = clock()
+        if (held or kept) and getattr(style, "hand_over_at", None) is not None:
+            style.hand_over_at = None   # paused or live: no end in sight, so what takes turns carries on taking them
+        elif not (held or kept) and (hold and live or stay > 0) and getattr(style, "hand_over_at", 0) is None:
+            try:                        # unpaused, or over: the end is back (now, if its time has already gone)
                 style.hand_over_at = style.ctx.now().timestamp() + max(0.0, end - clock())
             except Exception:
                 pass
         if hard is not None and clock() >= hard:
-            break   # sleep starts or ends: paused or not, the player moves on to it
-        if clock() >= end and not held:
+            break   # sleep starts or ends: paused, live or not, the player moves on to it
+        if clock() >= end and not held and not kept:
             if not (clock() < end + min(overrun, getattr(style, "most_overrun", overrun)) and busy(style)):
                 break   # (busy: a line is still scrolling, so it gets to finish)
         if live and live.skip.is_set():
@@ -109,20 +142,27 @@ def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None
         frame = last
         wait = frame_time
         under = frame             # what's playing, without any covering screen: the hub's public picture
+        if preview:               # a draft from the editor covers the screen, at its own rate; the screen underneath
+            draft = preview.cover(frame, frame_time)   # carries on unseen (it is still what the web is shown: a draft can be private)
+            if draft is not frame:
+                frame, wait = draft, min(frame_time, preview.pace)
+        plain = frame             # (a draft is never lit up like the screens below: it shows as bright as the panel is now)
         if live and live.overlay and cover:
             covered = live.overlay(frame)
             if covered is not frame:   # a screen over the style (PIN, address) scrolls at 20 fps whatever the style's rate;
-                frame, wait = covered, min(frame_time, 1 / 20)   # the style underneath still renders at its own
-            else:
+                frame, wait = covered, min(wait, 1 / 20)   # the style underneath still renders at its own
+            elif frame is under:
                 last = None            # uncovered: every pass renders, exactly as before
         if lit:
-            lit(frame is not under)
+            lit(frame is not plain)
         out = place(frame) if place else frame
         panel.show(out)
         if live:
             live.publish(out, public=out if under is frame else (place(under) if place else under))
         shown += 1
         stop.wait(max(0.0, wait - (clock() - started)))
+    if live:
+        live.staying = False
     return shown
 
 
@@ -135,6 +175,8 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
     lets the dashboard skip, pause, push a message, force sleep and override brightness.
     An entry with ``times`` only plays inside them: it is looked at when its turn comes, so the one on the
     panel finishes its seconds. With nothing to play (every entry has times, none now) the panel is dark.
+    A day screen that says it is live (``Style.stay``) keeps the panel past its seconds, within its module's
+    allowance (``stay_left``), never in the sleep hours; a message that cuts in on it gives the panel back to it.
     ``overlays`` (bongo.overlays.Overlays) draw over the day playlist, not splash, sleep or pushes."""
     stop = stop or threading.Event()
     if live:
@@ -146,8 +188,12 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
 
     def run(entry: Entry, upcoming: Entry | None = None, index: int | None = None, extras=None,
             limit: float | None = None, hold: bool = True, edge: bool = True, bright: bool = False,
-            cover: bool = True) -> bool:
+            cover: bool = True, stay: bool = False, back: float | None = None) -> bool:
+        """``back``: this is a live screen that a pushed message cut in on, given back the panel (``time.monotonic()``
+        when it was cut). Not a fresh turn: a moment (BACK) and then only while it is still live, and all of it,
+        the message's time too, is taken from its module's allowance."""
         shown = entry
+        cut[0] = False
         if entry.module == "splash":  # a Splash item: the next file from the Splash pool
             entry = schedule.splash if schedule else None
             if entry is None:
@@ -168,6 +214,14 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         # a GIF playing once hands over itself; its expected length is only a cap, with room for a slow Pi
         moving = entry.once and getattr(style, "moving", False)
         cap = entry.seconds + ONCE_SLACK if moving else entry.seconds
+        spent = stays.setdefault(entry.module, [])   # (Style.stay: what this module has had of its allowance)
+        began = time.monotonic()
+        if back is not None:
+            spent.append((began, max(0.0, began - back)))   # the message's time, while it was kept waiting
+        most = stay_left(spent, began) if stay else 0.0
+        if back is not None:                          # (a moment, and no more than is left of its allowance)
+            cap = min(cap, BACK, max(0.05, most))
+            most = max(0.0, most - cap)               # (that moment comes out of it too)
         seconds = cap if limit is None else max(0.0, min(cap, limit))
         if live:
             live.playing(shown, upcoming, index)
@@ -176,11 +230,19 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
                                 overrun=OVERRUN if limit is None else max(0.0, min(OVERRUN, limit - cap)),   # never into sleep
                                 until=limit if edge else None,   # (edge: the limit is sleep starting or ending)
                                 lit=(lambda covered: each_frame(True)) if bright else each_frame,   # (a pushed message: all of it)
-                                cover=cover)
+                                cover=cover, stay=most if limit is None else max(0.0, min(most, limit - cap)))
             lift(False)
         except Exception as error:  # one broken module must not stop the panel
             broken(f"{entry.module}/{entry.style} failed while playing; moving on", entry, error)
             return False
+        finally:
+            if live:
+                live.staying = False
+            if back is not None:
+                spent.append((time.monotonic(), time.monotonic() - began))   # given back: every second of it counts
+            elif getattr(style, "stayed", 0.0) > 0:
+                spent.append((time.monotonic(), style.stayed))
+        cut[0] = bool(getattr(style, "kept", False))   # live, and still being kept, when something ended it
         if frames:
             before[0] = style   # (one that skipped itself was never on the panel: the next carries on from the one before)
         if getattr(style, "nexted", False):
@@ -273,17 +335,34 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         over it when one is up, so pairing and setup work then too; such a screen keeps its own pace."""
         before[0] = None   # (after a dark panel the next screen starts afresh: nothing to carry on from)
         dark = ctx_factory().canvas()
-        covered = live.overlay(dark) if live and live.overlay else dark
-        lift(covered is not dark)
-        out = place(covered) if place else covered
-        panel.show(out)
-        if live:
-            live.publish(out, public=place(dark) if place else dark)
-        stop.wait(min(wait, 1 / 20) if covered is not dark else wait)
+        preview = getattr(live, "preview", None)
+        end = time.monotonic() + wait
+        while True:
+            draft = preview.cover(dark) if preview else dark   # the editor's Preview on the panel shows on a dark
+            covered = live.overlay(draft) if live and live.overlay else draft   # panel too, as bright as the panel is
+            lift(covered is not draft)
+            out = place(covered) if place else covered
+            panel.show(out)
+            if live:
+                live.publish(out, public=place(dark) if place else dark)
+            if covered is draft is dark:
+                stop.wait(wait)
+                break
+            left = end - time.monotonic()   # something covers the dark: it moves at its own pace, for as long as the
+            if covered is not draft:        # dark would have lasted (a draft), or one frame (the PIN, as it always has)
+                stop.wait(min(wait, 1 / 20))
+                break
+            stop.wait(max(0.0, min(left, preview.pace)))
+            if left <= preview.pace or stop.is_set() or live.reload.is_set() or live.skip.is_set():
+                break
         if live:
             live.skip.clear()   # nothing was playing: a Wake or Next pressed meanwhile mustn't skip the next screen
 
     before = [None]   # the screen played last, for a screen that carries on from it (``Style.follow``)
+    cut = [False]     # the screen just played was live and being kept (``Style.stay``) when something cut in on it
+    given = [None]    # (place in ``day``, when it was cut): the live screen to give the panel back to after a message
+    stays = getattr(live, "stays", None)   # module -> [(when, seconds kept)]: with ``live`` it outlasts a config save
+    stays = {} if stays is None else stays
     skipped = [0]   # screens in a row that skipped themselves without a frame (or failed)
     splashes = bool(schedule and schedule.splash_sources)   # Splash switched off: its items have nothing to play
 
@@ -387,8 +466,11 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         else:
             limit = schedule.seconds_until_change(now) if schedule else None
         edge = not (live and live.awake and hours)   # woken in the sleep hours: their end changes nothing
+        back = given[0][1] if given[0] is not None and not asleep and given[0][0] == index else None
+        given[0] = None
         ran = run(entry, upcoming, where, None if asleep else overlays,
-                  limit, edge=edge)   # where: slot in the saved playlist; limit: stop when sleep starts/ends
+                  limit, edge=edge,   # where: slot in the saved playlist; limit: stop when sleep starts/ends
+                  stay=not asleep and not hours, back=back)   # (live or not, no screen is kept in the sleep hours)
         if live and live.paused and not asleep:
             resume = index           # (the night may cut it short)
         if live and live.paused and live.pushes:   # a message cut in on the paused screen: come back to it after
@@ -397,6 +479,10 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
                 position[key] = index
             else:
                 cursor = again = index
+        elif live and live.pushes and cut[0] and not asleep:   # a message cut in on a screen that is live: it gets
+            played -= 1                                        # the panel back after (``run``'s ``back``)
+            cursor = index
+            given[0] = (index, time.monotonic())
         if not ran:
             skipped[0] += 1   # a screen that can't be built or broke counts as skipped too
         if skipped[0] >= turns:   # every screen skipped itself (Spotify, nothing on) or failed: dark, not a spin,

@@ -26,6 +26,7 @@ bongo/
   media.py       the media library: built-in/ (shipped) and uploaded/ (from the dashboard)
   holidays.py    offline holiday rules (Easter, bank holidays, "last Monday in May")
   live.py        what's on now, shared between the player and the dashboard
+  panelpreview.py  the editor's unsaved draft held on the panel for a while (Preview on the panel)
   web/           the dashboard: JSON API + a small single-page app (pair with a PIN)
   modules/       one folder per screen (table below)
 ```
@@ -127,6 +128,15 @@ is at that address runs on the display. `python -m bongo update` checks from the
 
 `prod_device` is rebuilt by CI after every green `main` (`tools/publish_prod.sh`), once a project
 access token with `write_repository` is saved as the masked CI/CD variable `PROD_PUSH_TOKEN`.
+
+### Back up and restore
+
+Settings → Back up and restore downloads one file, `<name>-matrix-YYYY-MM-DD.bongo.json`: the playlist and every
+screen's settings, Splash, Sleep, the boot screen, location and time zone. Restore it on the same Matrix or another
+one: choosing the file shows what it would replace and keep, and what to know first; nothing changes until you press
+Restore, and then all of it does or none. Never in a backup: API keys, Spotify's sign-in, calendar links, a module's
+passwords and tokens, paired browsers, Wi-Fi, brightness. Media files aren't in it either (screens name them, and
+the restore says which to upload again). A backup from a newer version is refused: update first.
 
 Media comes from two folders: `built-in/` (`resources/media/built-in`, shipped
 with the project, holding only screens: `splash_*` files are built-in Splash screens and

@@ -109,8 +109,27 @@ def installed() -> dict[str, dict]:
 
 def spec_for(module_id: str, info: dict) -> dict:
     """How the module's child is started (bongo.sandbox.remote)."""
+    from bongo import abilities
     return {"id": module_id, "dir": str(folder() / module_id), "data": str(work_dir(module_id)), "uid": info["uid"],
-            "net": "gate" if info.get("only_listed", True) else "open", "sites": info.get("sites", [])}
+            "net": "gate" if info.get("only_listed", True) else "open", "sites": info.get("sites", []),
+            **({"settings": True} if abilities.has_card(info.get("abilities")) else {}),   # (it has settings of its own)
+            "stay": bool((info.get("abilities") or {}).get("stay"))}   # (Style.stay: kept while live only if it asked, and was let)
+
+
+def apply_home(module_id: str, info: dict | None) -> None:
+    """Tell the gate the one home-network address a module may connect to: the one typed into its settings, if
+    it asked for one ("abilities": "home_address") and it is installed; otherwise none."""
+    from bongo import abilities
+    from bongo.sandbox import gate as gates
+
+    home = ((info or {}).get("abilities") or {}).get("home_address")
+    values = abilities.STORE.values(module_id, info["abilities"]) if home else {}
+    host, port = values.get("address") or None, values.get("port")
+    if host and port not in home["ports"]:
+        host = None
+    if host is None and (gates._gate is None or module_id not in gates._gate.homes):
+        return                                   # (nothing to take away: the gate needn't even be started)
+    gates.gate().set_home(module_id, host, port)
 
 
 def register(modules: dict) -> None:
@@ -131,6 +150,10 @@ def register(modules: dict) -> None:
             continue
         object.__setattr__(module, "_imported", True)
         modules[module_id] = module
+        try:
+            apply_home(module_id, info)
+        except OSError as error:
+            log.warning("imported module %s: its home-network address couldn't be set: %s", module_id, error)
 
 
 def is_imported(module) -> bool:
@@ -139,9 +162,15 @@ def is_imported(module) -> bool:
 
 def public(module_id: str, info: dict, blocked: list[str] | None = None) -> dict:
     """What the dashboard shows of an imported module."""
+    from bongo import abilities
     keys = ("name", "version", "author", "description", "homepage", "source", "sites", "installed", "update")
+    asked = info.get("abilities") or {}
     return {"id": module_id, **{k: info.get(k) for k in keys}, "only_listed": info.get("only_listed", True),
-            "blocked": blocked or []}
+            "blocked": blocked or [],
+            # what it was allowed at import, in words; whether it has a card of its own; what it last said of itself
+            "abilities": abilities.words(asked), "background": bool(asked.get("background")),
+            "card": abilities.has_card(asked), "screens": bool((info.get("described") or {}).get("styles")),
+            "status": abilities.STORE.status(module_id) if asked.get("background") else None}
 
 
 # -- checking a module's folder ----------------------------------------------------------------------------
@@ -174,6 +203,15 @@ def check_manifest(data, builtin_ids=()) -> dict:
         if not isinstance(home, str) or not home.startswith("https://") or len(home) > 200:
             raise ImportProblem(f'{MANIFEST}: "homepage" must be an https:// link')
         out["homepage"] = home
+    from bongo import abilities
+    try:   # what it asks for beyond drawing its screens: every name must be one this Matrix knows
+        asked = abilities.check(data.get("abilities"), data.get("api"))
+    except abilities.Newer as error:
+        raise ImportProblem(str(error)) from None
+    except abilities.Problem as error:
+        raise ImportProblem(f"{MANIFEST}: {error}") from None
+    if asked:
+        out["abilities"] = asked
     return out
 
 
@@ -322,9 +360,15 @@ def try_out(dest: Path, manifest: dict, uid: int) -> tuple[dict, str]:
     from bongo.module import Context
     from bongo.sandbox import remote
 
+    from bongo import abilities
+
     module_id = manifest["id"]
+    asked = manifest.get("abilities") or {}
     spec = {"id": f"try_{module_id}"[:40], "module_id": module_id, "dir": str(dest), "data": str(dest.parent / "work"), "uid": uid,
-            "net": "gate", "sites": manifest["sites"]}
+            "net": "gate", "sites": manifest["sites"],
+            # not trusted yet: its screens are tried with its settings' defaults (never what was typed into an
+            # installed version), its background task isn't run, and it has no home-network address
+            **({"settings": {f["name"]: f.get("default", "") for f in abilities.fields(asked)}} if abilities.has_card(asked) else {})}
     child = remote.Child(spec)
     started = time.monotonic()
     try:
@@ -335,6 +379,17 @@ def try_out(dest: Path, manifest: dict, uid: int) -> tuple[dict, str]:
             raise ImportProblem("its MODULE.id doesn't match its " + MANIFEST)
         if described.get("name") != manifest["name"]:
             raise ImportProblem(f"its MODULE.name ({described.get('name')!r}) doesn't match the name in its {MANIFEST}")
+        if bool(described.get("background")) != bool(asked.get("background")):   # the review must say what it does
+            raise ImportProblem(f'its {MANIFEST} asks for "background" but its MODULE has no background task' if asked.get("background")
+                                else f'its MODULE has a background task, but its {MANIFEST} doesn\'t ask for one ("abilities": {{"background": true}})')
+        # a setting of its own card that it names in MODULE.secrets is a secret: the review says so, and from here
+        # on its value is only ever kept by bongo/private.py. One that is only on the card (not also one of its
+        # screens' settings) is left out of the secrets its screens' settings are checked against
+        secret = [str(n) for n in described.get("secrets") or ()]
+        if wrong := abilities.mark_secrets(asked, secret):
+            raise ImportProblem(f'its MODULE.secrets names {wrong[0]}, which its {MANIFEST} doesn\'t give as a "text" setting with nothing in it')
+        screens = set(described.get("defaults") or {}).union(*((s.get("defaults") or {}) for s in (described.get("styles") or {}).values()))
+        described["secrets"] = [n for n in secret if n in screens or n not in {f["name"] for f in abilities.fields(asked)}]
         if described.get("help") is not None:   # its Help guide is shown in the dashboard: text, and https links only
             from bongo.schema import help_problems
             guide = described["help"]
@@ -358,7 +413,7 @@ def try_out(dest: Path, manifest: dict, uid: int) -> tuple[dict, str]:
                         raise ImportProblem(f"its “{name.replace('_', ' ').capitalize()}” look stopped working ({child.error or 'see the Logs page'})")
                     if size == (64, 32) and name == module.default_style:
                         frames.append(frame)
-        return described, preview_gif(frames)
+        return described, preview_gif(frames) if frames else None   # (None: it has no screens, only a background task)
     except remote.ChildError as error:
         raise ImportProblem(f"it didn't load: {error}") from None
     finally:
@@ -387,6 +442,7 @@ class Job:
         self.dir = None
         self.updating = False
         self.new_sites = []
+        self.new_abilities = []      # an update: what this version asks for that the installed one doesn't
         self.only_listed = True
         self.running = True          # its thread is still at work (even if cancelled)
         self.cancelled = False
@@ -396,9 +452,13 @@ class Job:
         out = {"token": self.token, "step": self.step, "state": self.state, "message": self.message, "source": self.source}
         if self.state == "ready":
             from bongo.sandbox.jail import can_shut_in
+            from bongo import abilities
             out.update(manifest=self.manifest, preview=self.preview, updating=self.updating, new_sites=self.new_sites,
                        only_listed=self.only_listed, enforced=can_shut_in(),
-                       styles=list(self.described["styles"]), origin=self.origin)
+                       styles=list(self.described["styles"]), origin=self.origin,
+                       # what it asks for beyond drawing its screens, in plain words (the review lists them
+                       # before "I trust" can be ticked), and what is new in an update
+                       abilities=abilities.words(self.manifest.get("abilities")), new_abilities=self.new_abilities)
         return out
 
 
@@ -444,6 +504,8 @@ def start(source: str, *, url: str | None = None, upload: Path | None = None, up
             job.updating = have is not None
             job.only_listed = have.get("only_listed", True) if have else True
             job.new_sites = sorted(set(job.manifest["sites"]) - set(have.get("sites", []))) if have else []
+            from bongo import abilities
+            job.new_abilities = abilities.added(job.manifest.get("abilities"), have.get("abilities")) if have else []
             if job.cancelled:
                 return
             job.step = "try"
@@ -511,6 +573,9 @@ def install(token: str, modules: dict) -> dict:
         old = target.with_name(f".{module_id}-old")
         aside = False                                  # this install moved the version that was there aside
         try:
+            from bongo import abilities
+            from bongo.sandbox import background
+            background.drop(module_id)                 # its background task rests until this is done (``sync``)
             remote.stop(module_id)
             folder().mkdir(parents=True, exist_ok=True)
             shutil.rmtree(old, ignore_errors=True)
@@ -525,7 +590,15 @@ def install(token: str, modules: dict) -> dict:
             info.pop("id")
             info.pop("update", None)
             state["modules"][module_id] = info
+            # its own settings: what was typed before is kept where this version still has the field. Before the
+            # state is saved, so nothing of it runs with settings that aren't there yet
+            if not have:                               # new here: nothing typed for another module of the same id is its
+                from bongo import private
+                private.forget(module_id)
+                abilities.STORE.forget(module_id)
+            abilities.STORE.adopt(module_id, info.get("abilities") or {})
             save_state(state)
+            apply_home(module_id, info)                # (a version that no longer asks for one loses it)
             module = remote.build(info["described"], spec_for(module_id, info))
             object.__setattr__(module, "_imported", True)
             # ``modules`` is shared with the player and other requests: they read it through list(...) (a copy
@@ -568,12 +641,18 @@ def remove(module_id: str, modules: dict) -> None:
     from bongo.sandbox import remote
     from bongo.sandbox.gate import gate
 
+    from bongo import abilities
+    from bongo.sandbox import background
+
     with _lock:                                      # all of it: never half-removed while it's installed again
         state = load_state()
         if state["modules"].pop(module_id, None) is None:
             raise KeyError(module_id)
         save_state(state)
+        background.drop(module_id)
         remote.stop(module_id)
+        apply_home(module_id, None)
+        abilities.STORE.forget(module_id)            # its own settings go with it (and, below, its secrets)
         try:
             gate().forget(module_id)
         except OSError:
@@ -582,6 +661,11 @@ def remove(module_id: str, modules: dict) -> None:
             modules.pop(module_id, None)
         shutil.rmtree(folder() / module_id, ignore_errors=True)
         shutil.rmtree(work_dir(module_id), ignore_errors=True)
+        try:
+            from bongo import private
+            private.forget(module_id)                # any secret settings it had (an API key) go with it
+        except OSError:
+            pass
     log.info("module %s removed", module_id)
 
 

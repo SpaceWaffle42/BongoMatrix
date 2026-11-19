@@ -132,10 +132,15 @@ def describe(module) -> dict:
     """JSON-ready description of a module: shared settings and each style's own."""
     tiered = bool(module.basic or any(cls.basic for cls in module.styles.values()))
 
-    def fields(defaults, choices, swatches=None, basic=()):
+    def fields(defaults, choices, swatches=None, basic=(), secrets=()):
         swatches = swatches or {}
 
         def typed(n, d):
+            if n in module.secrets:   # the module's own: kept apart and never sent (bongo/private.py), only whether one is saved
+                from bongo import private
+                return {"type": "secret", "kept": "module", "set": private.saved(module.id, n)}
+            if n in secrets:          # a look's own: saved with its screen, a stand-in sent in its place (bongo/standins.py)
+                return {"type": "secret", "kept": "screen"}
             if n in module.places:
                 lat, lon = module.places[n]
                 return {"type": "place", "latitude": lat, "longitude": lon}
@@ -163,7 +168,7 @@ def describe(module) -> dict:
         "default_style": module.default_style,
         "settings": fields(module.defaults, shared_choices, basic=module.basic),
         "styles": {name: {**({"limits": {n: list(v) for n, v in cls.limits.items()}} if cls.limits else {}),
-                          "settings": fields(cls.defaults, {**shared_choices, **cls.choices}, cls.swatches, cls.basic),
+                          "settings": fields(cls.defaults, {**shared_choices, **cls.choices}, cls.swatches, cls.basic, getattr(cls, "secrets", ())),
                           **({"group": cls.group} if cls.group else {})}
                    for name, cls in module.styles.items()},
     }

@@ -28,7 +28,7 @@ from flask import Flask, Response, abort, jsonify, request, send_file, send_from
 from werkzeug.exceptions import HTTPException
 
 from bongo import animator, config as cfg, logo, net, netname, pets, petpack, sprite_preview, update
-from bongo import addons, media, places
+from bongo import addons, media, places, private, standins
 from bongo.fonts import Fonts, names as font_names, table as font_table
 from bongo.module import Context
 from bongo.player import Entry
@@ -53,8 +53,8 @@ class LogBuffer(logging.Handler):
         self.records.append({
             "t": record.created, "level": record.levelname, "source": record.name.rsplit(".", 1)[-1],
             "message": re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", record.getMessage()),   # no terminal colour codes
-            "trace": self.formatter.formatException(record.exc_info) if record.exc_info and self.formatter else
-                     (logging.Formatter().formatException(record.exc_info) if record.exc_info else ""),
+            "trace": record.exc_text or (self.formatter.formatException(record.exc_info) if record.exc_info and self.formatter else
+                     (logging.Formatter().formatException(record.exc_info) if record.exc_info else "")),   # (exc_text: secrets blanked, standins)
         })
 
 
@@ -142,7 +142,10 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
 
     def restart_needed(config) -> bool:
         return any(config["panel"].get(k) != running_panel.get(k) for k in HARDWARE)
+    from bongo.sandbox import background   # imported modules' background tasks, and the controls they may use
+    background.attach(live, modules, lambda: cfg.load(config_path))
     last_show: dict[str, float] = {}   # address -> when it last asked for the PIN (browsers that aren't paired)
+    live.mask = lambda entry: standins.mask_entry(entry, modules)   # what's playing, as a browser may see it (live.status)
 
     def body() -> dict:
         data = request.get_json(silent=True)
@@ -180,7 +183,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
 
     def load():
         config = cfg.load(config_path)
-        cfg.tidy(config, modules)  # an older build's settings never block a save
+        cfg.tidy(config, modules, config_path)  # an older build's settings never block a save (and a stray secret leaves the file)
         return config
 
     # -- auth -----------------------------------------------------------------------------
@@ -264,7 +267,9 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
                        safe_area=dict(zip(("top", "right", "bottom", "left"), area.margins)),
                        uptime=round(time.time() - started), name=config.get("name", "Bongo Matrix"),
                        build=build,   # the pages as they are now: a tab left open across an update sees it change
-                       pet_kinds=pets.kinds(), network=network_info(config), trouble=troubles())
+                       pet_kinds=pets.kinds(), network=network_info(config), trouble=troubles(),
+                       # {"sleep" | "brightness": a module's name}: the one in force now was set by that module
+                       set_by=background.CONTROLS.set_by() if background.CONTROLS else {})
 
     def troubles() -> dict:
         """What stops a module's screens showing anything (Module.trouble), by module: the dashboard says it on them."""
@@ -411,6 +416,8 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     def control():
         data = body()
         action = data.get("action")
+        if action in ("sleep", "wake", "brightness") and background.CONTROLS:   # (set here, by hand: no module did it)
+            background.CONTROLS.dashboard_set("brightness" if action == "brightness" else "sleep")
         if action == "next":
             live.skip.set()
         elif action in ("pause", "resume"):
@@ -907,7 +914,40 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     # -- modules and config -------------------------------------------------------------------
     @app.get("/api/modules")
     def module_list():
-        return jsonify([{**describe(m), **({"imported": True} if addons.is_imported(m) else {})} for m in list(modules.values())])   # (a copy: an install may change it meanwhile)
+        from bongo import abilities
+        cards = {k for k, info in addons.installed().items() if abilities.has_card(info.get("abilities"))}   # (a card of its own in Settings)
+        return jsonify([{**describe(m), **({"imported": True} if addons.is_imported(m) else {}),
+                         **({"settings_card": True} if m.id in cards and addons.is_imported(m) else {})}
+                        for m in list(modules.values())])   # (a copy: an install may change it meanwhile)
+
+    # -- a module's shared secrets (Module.secrets; bongo/private.py): saved apart from the config, one value for
+    # all the module's screens. Never sent back: the module list says only whether one is saved -------------------
+    def secret_module(module_id, name):
+        module = modules.get(module_id)
+        if module is None or name not in module.secrets:
+            abort(404, "no such setting")
+        return module
+
+    def secret_changed(module, name, what):
+        preview_style.cache_clear()   # previews are drawn with it (or without it) from now on
+        logging.getLogger("bongo.web").info("%s: %s %s by %s", module.id, name, what,
+                                            (pairing.check(request.cookies.get(COOKIE)) or {}).get("name"))
+        return jsonify(ok=True, set=private.saved(module.id, name))
+
+    @app.put("/api/modules/<module_id>/secrets/<name>")
+    def secret_save(module_id, name):
+        module = secret_module(module_id, name)
+        try:
+            private.keep(module.id, name, body().get("value"))
+        except ValueError as error:
+            return jsonify(error=str(error)), 422
+        return secret_changed(module, name, "saved")
+
+    @app.delete("/api/modules/<module_id>/secrets/<name>")
+    def secret_forget(module_id, name):
+        module = secret_module(module_id, name)
+        private.forget(module.id, name)
+        return secret_changed(module, name, "cleared")
 
     # -- imported modules (Settings > Modules > Import; bongo/addons.py) ------------------------------
     def builtin_ids():
@@ -999,11 +1039,18 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             return jsonify(error="That import has expired; start it again."), 404
         if (job.manifest or {}).get("author") != data.get("author"):
             return jsonify(error="Tick that you trust its author first."), 422
+        # what it asks for beyond its screens must have been on the page that sent this: a page left open from
+        # before an update of the Matrix wouldn't have listed it, and nothing is agreed to unseen
+        asked = sorted(w["key"] for w in job.public().get("abilities", []))
+        if asked and sorted(map(str, data.get("abilities") or [])) != asked:
+            return jsonify(error="This module asks for more than this page showed. Reload the page and look at it again."), 422
         updating = job.manifest["id"] in modules
         try:
             info = addons.install(job.token, modules)
         except addons.ImportProblem as error:
             return jsonify(error=str(error)), 409
+        finally:
+            background.sync(load())   # its background task, if it has one and is switched on (the new version's, after an update)
         preview_style.cache_clear()
         if updating:   # a new version: the panel reloads its screens, so a setting the new one no longer has is
             live.apply_config()   # tidied away (config.tidy) now, rather than that screen being skipped until a restart
@@ -1023,6 +1070,45 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         preview_style.cache_clear()
         return jsonify(addon_list())
 
+    # -- an imported module's own settings (bongo/abilities.py): a card of its own in Settings ----------------
+    def module_card(module_id):
+        from bongo import abilities
+        from bongo.sandbox import gate as gates
+        info = addons.installed().get(module_id)
+        if info is None or not abilities.has_card(info.get("abilities")):
+            abort(404, "that module has no settings of its own")
+        asked = info["abilities"]
+        home = gates._gate.home_said(module_id) if gates._gate and asked.get("home_address") else None
+        return {"id": module_id, "name": info.get("name"), "description": info.get("description") or "",
+                "on": module_id not in cfg.modules_off(load()), "background": bool(asked.get("background")),
+                **abilities.STORE.public(module_id, asked),   # (a secret is only ever "set" or not)
+                "status": abilities.STORE.status(module_id) if asked.get("background") else None,
+                # the address it last connected to, or why the gate didn't let it through
+                "home": home, "only_listed": info.get("only_listed", True)}
+
+    @app.get("/api/addons/<module_id>/settings")
+    def addons_settings(module_id):
+        return jsonify(module_card(module_id))
+
+    @app.put("/api/addons/<module_id>/settings")
+    def addons_settings_save(module_id):
+        from bongo import abilities
+        sent = body().get("values")
+        with save_lock:
+            info = addons.installed().get(module_id)
+            if info is None or not abilities.has_card(info.get("abilities")):
+                abort(404, "that module has no settings of its own")
+            try:
+                abilities.STORE.change(module_id, info["abilities"], sent)
+            except abilities.Problem as error:
+                return jsonify(error=str(error)), 422
+            addons.apply_home(module_id, info)   # the gate goes by the address as it is now (none: nothing allowed)
+        preview_style.cache_clear()
+        # (never what was typed: a password may be among it)
+        logging.getLogger("bongo.addons").info("module %s: its settings were saved by %s", module_id,
+                                               (pairing.check(request.cookies.get(COOKIE)) or {}).get("name"))
+        return jsonify(module_card(module_id))
+
     @app.delete("/api/addons/<module_id>")
     def addons_remove(module_id):
         """Remove an imported module, and its screens from the playlist and overlays."""
@@ -1038,6 +1124,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             except KeyError:   # removed by another press a moment ago
                 abort(404, "no such module")
             preview_style.cache_clear()
+            background.sync(config)
             changed = {"playlist": playlist, "modules_off": off, **({"overlays": overlays} if "overlays" in config else {})}
             save = any(config.get(k) != v for k, v in changed.items())
             if save:
@@ -1048,7 +1135,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
 
     @app.get("/api/config")
     def get_config():
-        return jsonify(load())
+        return jsonify(standins.mask(load(), modules))   # (a secret saved with a screen is never sent back: its stand-in is)
 
     def revisions(config) -> dict:
         """A short mark for each section of the config as it is saved now. A page keeps the marks it
@@ -1087,6 +1174,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         for key in ("panel", "safe_area", "web"):   # merged key by key below: never replaced by null or a list
             if key in data and not isinstance(data[key], dict):
                 return jsonify(problems=[f"{key}: send an object"]), 422
+        data = standins.unmask(data, current, modules)   # (the stand-in a page holds for a saved secret: the secret again)
         for side, value in (data.get("safe_area") or {}).items():   # 1e999 would overflow turning it into pixels
             if isinstance(value, float) and not math.isfinite(value):
                 return jsonify(problems=[f"safe_area: {side} must be a number of pixels"]), 422
@@ -1124,11 +1212,77 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         logging.getLogger("bongo.config").info("config saved by %s",
                                                (pairing.check(request.cookies.get(COOKIE)) or {}).get("name"))
         live.apply_config()
+        background.sync(merged)   # a module switched on or off: its background task starts or stops with it
         for module_id in set(merged.get("modules_off") or []) - set(current.get("modules_off") or []):
             if addons.is_imported(modules.get(module_id)):   # switched off: an imported module stops running at all
                 from bongo.sandbox import remote
                 remote.stop(module_id)
         return jsonify(ok=True, restart_needed=restart_needed(merged), revisions=revisions(load()))
+
+    # -- back up and restore (bongo/backup.py; Settings > Back up and restore) --------------------------
+    @app.get("/api/backup")
+    def backup_download():
+        """The backup, as a file the browser saves. Never anything secret in it: see bongo/backup.py."""
+        from bongo import backup
+        config = load()
+        made = backup.make(config, modules)
+        data = backup.dump(made)
+        name = backup.file_name(config.get("name") or netname.DEFAULT_NAME, dt.datetime.fromisoformat(made["made"]).date())
+        if request.method == "GET":   # (not a HEAD: nothing was downloaded)
+            backup.remember(config_path, name, len(data), dt.datetime.fromisoformat(made["made"]))
+            logging.getLogger("bongo.backup").info("backup downloaded by %s",
+                                                   (pairing.check(request.cookies.get(COOKIE)) or {}).get("name"))
+        answer = Response(data, mimetype="application/json")
+        answer.headers["Content-Disposition"] = f'attachment; filename="{name}"'
+        answer.headers["Cache-Control"] = "no-store"
+        return answer
+
+    @app.get("/api/backup/status")
+    def backup_status():
+        from bongo import backup
+        # check_addresses: a backup made now would hold a web address, which may have a key in its path (the card says to look)
+        return jsonify(last=backup.last(config_path), most=backup.MOST_BYTES,
+                       check_addresses=backup.addresses(backup.make(load(), modules)))
+
+    def backup_plan(current):
+        """The plan for the backup file sent (its text), or the answer that says why not (nothing changed)."""
+        from bongo import backup
+        request.max_content_length = 8 * backup.MOST_BYTES   # room for the file as text inside JSON; ``read`` has the real limit
+        try:
+            if (request.content_length or 0) > 7 * backup.MOST_BYTES:   # (text in JSON can be six times its size: \u0000)
+                backup.read("x" * (backup.MOST_BYTES + 1))           # refused in the same words as any file too big
+            return backup.plan(backup.read(body().get("text")), current, modules), None
+        except backup.Refused as error:
+            return None, (jsonify(error=str(error), newer=error.newer, problems=error.problems, backup=error.about), 422)
+
+    def backup_onto(plan):
+        from bongo import backup
+        # the file as saved (a damaged one: the copy from before the last save, as config.load reads it)
+        return backup.onto(cfg._read(config_path) or cfg._read(cfg.backup_path(config_path)) or {}, plan)
+
+    @app.post("/api/backup/review")
+    def backup_review():
+        """Step one of a restore: what the chosen file would replace and what to know first. Changes nothing."""
+        plan, refused = backup_plan(load())
+        return refused or jsonify(plan.review)
+
+    @app.post("/api/backup/restore")
+    def backup_restore():
+        """Step two: all of it or none. The whole new config is checked before anything is written, and
+        written in one go (config.save); the panel then picks it up as it does a dashboard save."""
+        with save_lock:   # (no save can land between reading this Matrix's own settings and writing them back)
+            plan, refused = backup_plan(load())
+            if refused:
+                return refused
+            cfg.save(backup_onto(plan), config_path)   # only what a backup replaces: the rest of the file as it was
+        who = (pairing.check(request.cookies.get(COOKIE)) or {}).get("name")
+        logging.getLogger("bongo.backup").info("backup of %s restored by %s: %d screens", plan.review["name"] or "a Matrix",
+                                               who, plan.review["screens"])
+        for note in plan.notes:
+            logging.getLogger("bongo.backup").info("restore: %s", note)
+        live.apply_config()
+        # the marks change, so a page left open elsewhere is asked before its old copy replaces any of this
+        return jsonify(ok=True, restart_needed=restart_needed(plan.config), revisions=revisions(load()), **plan.review)
 
     @lru_cache(maxsize=12)
     def preview_style(module, style, settings_json, width, height, pet, home_json="null", zone=None, calendar_json="null",
@@ -1156,8 +1310,14 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             return jsonify(error="that module is switched off"), 409   # off means its code doesn't run at all
         try:
             settings = json.loads(request.args.get("settings", "{}"))
-            settings_json = json.dumps(settings, sort_keys=True)
             config = load()
+            if isinstance(settings, dict) and standins.own_names(modules[name], request.args.get("style") or None):
+                # a secret saved with a screen reaches the page as a stand-in (bongo/standins.py): drawn with the secret
+                screen = {"module": name, "style": request.args.get("style") or None, "settings": settings}
+                settings = standins.unmask({"playlist": [screen]}, config, modules)["playlist"][0]["settings"]
+                gone = standins.stand_ins(modules[name], screen["style"], settings)
+                settings = {k: v for k, v in settings.items() if k not in gone}   # (one that is gone: as if not set)
+            settings_json = json.dumps(settings, sort_keys=True)
             area = cfg.safe_area(config)
             style = preview_style(name, request.args.get("style", ""), settings_json, area.width, area.height,
                                   pets.of(config), json.dumps(config.get("location"), sort_keys=True),
@@ -1172,6 +1332,10 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         out = io.BytesIO()
         img.save(out, "PNG")
         return send_file(io.BytesIO(out.getvalue()), mimetype="image/png", max_age=0)
+
+    # -- Preview on the panel: the editor's unsaved draft on the real panel for a while (bongo/web/panel_preview.py) --
+    from bongo.web import panel_preview
+    panel_preview.register(app, modules=modules, live=live, pairing=pairing, load=load, cookie=COOKIE, fonts=fonts)
 
     @app.get("/api/places")
     def place_search():
@@ -1266,7 +1430,10 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
 
     @app.delete("/api/devices/<device_id>")
     def remove_device(device_id):
-        return jsonify(ok=pairing.remove(device_id))
+        removed = pairing.remove(device_id)
+        if removed:
+            live.preview.unpaired(device_id)   # (its Preview on the panel, if any, ends now: not 30 s from now)
+        return jsonify(ok=removed)
 
     @app.get("/api/logs")
     def get_logs():

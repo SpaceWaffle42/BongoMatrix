@@ -342,6 +342,11 @@ window.addEventListener('dragover', (ev) => {
 window.addEventListener('drop', (ev) => { if (draggingFiles(ev)) ev.preventDefault(); });
 
 // -- boot ------------------------------------------------------------------------------------
+/** The secret settings a screen keeps with it (Style.secrets), by name: never put in a preview's address (api.js). */
+hooks.secrets = (entry) => {
+  const mod = moduleById(entry?.module);
+  return (mod?.styles?.[entry.style || mod?.default_style]?.settings || []).filter((f) => f.type === 'secret').map((f) => f.name);
+};
 hooks.unauthorized = () => {
   if (path() === '/pair') return;
   S.config = null;

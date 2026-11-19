@@ -1,5 +1,5 @@
 // Module editor: style picker + a form generated from /api/modules, with a live preview.
-import { previewPath, get, uploadMedia } from './api.js';
+import { previewPath, get, put, del, uploadMedia, SAVED } from './api.js';
 import { h, icon, toast, clone, same, humanize, toggle, segmented, store, reducedMotion } from './ui.js';
 import { FrameLoop } from './led.js';
 import { openPreview } from './mediaview.js';
@@ -8,6 +8,7 @@ import { iconPicker } from './iconpick.js';
 import { feedFilters } from './feedfilters.js';
 import { S, onLeave, go, href, path, moduleById, styleOf, entryName, applyDraft, draftChanged, matrixClock, problemOf, problemLine } from './app.js';
 import { MOST_TIMES, mins, valid, joined, sentence, sleepTime, meetsSleep, suggest, moved } from './times.js';
+import { panelPreview } from './panelpreview.js';
 
 /** Settings for a style: shared ones (unless the style redefines them) and the style's own. */
 export function schemaFor(mod, style) {
@@ -35,16 +36,25 @@ export function render(view, match) {
   let showSafe = store.get('editorSafe', true);
 
   const edited = h('span', { class: 'pill-warn', hidden: true }, 'Edited');
+  // Preview on the panel: the unsaved draft on the real panel while this switch is on (off every time the editor opens)
+  const untilApply = h('span', null, 'Nothing changes on the panel until you apply.');
+  const onPanel = mod && e.module !== 'splash' ? panelPreview({ index: i,   // (a Splash item has no draft: it plays the Splash files)
+    draft: () => ({ module: e.module, style: e.style || undefined, seconds: e.seconds, settings: e.settings, enabled: e.enabled,
+      times: e.times?.length ? e.times : undefined }),   // (as applyDraft sends it: the Matrix checks it as it would a save)
+    onState: (on) => { untilApply.textContent = on ? 'The panel is showing them too, for now. Nothing is saved until you apply.' : 'Nothing changes on the panel until you apply.'; } }) : null;
+  onLeave(() => onPanel?.stop());   // Save, Apply, Cancel or any other way out: the panel goes back to the playlist
   const head = h('div', { class: 'editor-head' },
     h('div', { class: 'row gap-s wrap' },
       h('a', { href: href('/playlist'), 'data-route': '/playlist', class: 'crumb' }, icon('left'), 'Playlist'),
       h('span', { class: 'crumb-sep', 'aria-hidden': 'true' }, '/'),
       h('h1', { class: 'h1 small-h' }, entryName(e)), edited),
+    onPanel?.toggle,
     h('div', { class: 'row gap-s wrap' },
       h('button', { type: 'button', class: 'btn ghost', onclick: cancel }, 'Cancel'),
       h('button', { type: 'button', class: 'btn', onclick: keepDraft, title: 'Keep these edits in the playlist draft without sending them yet' }, 'Save to draft'),
       h('button', { type: 'button', class: 'btn primary', onclick: apply }, 'Apply to Matrix')));
   view.append(head);
+  if (onPanel) view.append(onPanel.notices);
   if (!mod) {
     view.append(h('div', { class: 'card stack' }, h('p', { class: 'error-box' }, `The module “${e.module}” isn't installed on this Matrix, so it can't be edited.`),
       h('button', { type: 'button', class: 'btn', onclick: () => go('/playlist') }, 'Back to the playlist')));
@@ -299,8 +309,73 @@ export function render(view, match) {
     return sec;
   }
 
+  /** A secret (a password, an API key). Once saved, the Matrix never sends it back, so a row only says whether one
+   *  is saved and takes a new one in its place or clears it. There are two kinds (docs/MODULES.md):
+   *  the module's own (``f.kept`` "module": one for all its screens, saved the moment Save is pressed, apart from
+   *  the playlist), and one that belongs to this screen (saved with it: the page holds a stand-in, "(saved:…)"). */
+  function secretRow(f) {
+    const row = h('div', { class: 'field wide' }), id = `f-${f.name}`, label = humanize(f.name);
+    const input = (placeholder, value = '') => h('input', { class: 'input mono grow', id, type: 'password', autocomplete: 'off', spellcheck: 'false',
+      maxlength: 500, value, placeholder });
+    const savedLine = () => [h('span', { class: 'dot ok', 'aria-hidden': 'true' }), h('span', null, 'Saved on the Matrix. It is never shown again.')];
+    const note = f.note ? h('div', { class: 'tiny muted' }, f.note) : null;
+    const head = (...more) => h('div', { class: 'field-head' }, h('label', { class: 'field-label', for: id }, label), ...more);
+
+    const ofModule = () => {   // kept for the whole module
+      const mark = (on) => { f.set = on; const kept = (mod.settings || []).find((x) => x.name === f.name); if (kept) kept.set = on; };
+      const box = input(f.set ? 'Paste a new one to replace it' : 'Paste it here');
+      const save = h('button', { type: 'submit', class: 'btn primary' }, 'Save');
+      const form = h('form', { class: 'row gap-s' }, box, save);
+      form.onsubmit = async (ev) => {
+        ev.preventDefault();
+        save.disabled = true;
+        try {
+          mark((await put(`/api/modules/${mod.id}/secrets/${f.name}`, { value: box.value })).set);
+          toast(`${label} saved`, 'success');
+          ofModule(); preview.refresh();
+        } catch (x) { toast(x.message, 'error', 8000); save.disabled = false; box.focus(); }
+      };
+      const clear = h('button', { type: 'button', class: 'link reset', 'aria-label': `Clear ${label}`, hidden: !f.set, onclick: async () => {
+        try { mark((await del(`/api/modules/${mod.id}/secrets/${f.name}`)).set); toast(`${label} cleared`); ofModule(); preview.refresh(); }
+        catch (x) { toast(x.message, 'error', 8000); }
+      } }, 'Clear');
+      row.classList.toggle('changed', !!f.set);
+      row.replaceChildren(...[head(h('span', { class: 'changed-mark' }, 'set'), clear), form,
+        h('p', { class: 'small flush row gap-s', role: 'status' }, ...(f.set ? savedLine() : [h('span', { class: 'muted' }, 'Not set.')])),
+        note,
+        h('div', { class: 'tiny muted' }, `One for every ${mod.name} screen. Saved when you press Save, apart from the playlist.`)].filter(Boolean));
+    };
+
+    const ofScreen = (focus) => {   // kept with this screen, in the draft like any other setting
+      const now = e.settings[f.name] ?? '', saved = SAVED.test(now);
+      const box = input(saved ? 'Type a new one to replace it' : 'Type or paste it here', saved ? '' : now);
+      const state = h('p', { class: 'small flush row gap-s', role: 'status' });
+      const clear = h('button', { type: 'button', class: 'link reset', 'aria-label': `Clear ${label}`,
+        onclick: () => { delete e.settings[f.name]; changed(); ofScreen(true); } }, 'Clear');
+      const say = () => {
+        const v = e.settings[f.name] ?? '';
+        state.replaceChildren(...(SAVED.test(v) ? savedLine()
+          : v ? [h('span', { class: 'muted' }, 'New: saved when you apply. The preview uses it from then.')] : [h('span', { class: 'muted' }, 'Not set.')]));
+        row.classList.toggle('changed', !!v);
+        clear.hidden = !v;
+      };
+      box.addEventListener('input', () => {
+        if (box.value) e.settings[f.name] = box.value;
+        else if (saved) e.settings[f.name] = now;      // emptied again: the saved one stays
+        else delete e.settings[f.name];
+        say(); changed();
+      });
+      row.replaceChildren(...[head(h('span', { class: 'changed-mark' }, 'set'), clear), box, state, note].filter(Boolean));
+      say();
+      if (focus) box.focus();
+    };
+    if (f.kept === 'module') ofModule(); else ofScreen();
+    return row;
+  }
+
   function fieldRow(f) {
     if (f.name === 'own_location') return null;   // it's the switch on the place row (placeRow)
+    if (f.type === 'secret') return secretRow(f);
     if (f.type === 'place' && Object.values(schemaFor(mod, styleOf(e))).flat().some((x) => x.name === 'own_location')) return placeRow(f);
     const row = h('div', { class: ['items', 'palettes', 'media', 'place'].includes(f.type) || f.swatches || f.word_filters ? 'field wide' : 'field' });
     const id = `f-${f.name}`;
@@ -387,7 +462,7 @@ export function render(view, match) {
       h('div', { class: 'led-frame' }, canvas), err,
       h('p', { class: 'muted tiny flush mono' }, `Safe area T${sa.top || 0} R${sa.right || 0} B${sa.bottom || 0} L${sa.left || 0} · `,
         h('a', { href: href('/settings'), 'data-route': '/settings', class: 'tap' }, 'change'))),
-    h('div', { class: 'note' }, icon('info'), h('span', null, 'Drawn by the Matrix itself, frame by frame, with your unsaved settings. Nothing changes on the panel until you apply.')));
+    h('div', { class: 'note' }, icon('info'), h('span', null, 'Drawn by the Matrix itself, frame by frame, with your unsaved settings. ', untilApply)));
 
   view.append(h('div', { class: 'editor-grid' },
     h('div', { class: 'editor-form stack' }, problems,
@@ -411,6 +486,7 @@ export function render(view, match) {
 
   function changed() {
     edited.hidden = same(e, original);
+    onPanel?.changed();   // (half a second after the last change, if the switch is on)
     sections.querySelectorAll('section').forEach((s) => s.recount?.());
     if (!Number.isFinite(preview.o.interval)) preview.refresh();
     clearTimeout(thumbTimer);

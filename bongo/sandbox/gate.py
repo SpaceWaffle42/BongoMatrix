@@ -4,6 +4,11 @@ request here over a local socket; the gate lets it through only to a site in tha
 
 Shut in (``jail.can_shut_in``), each child runs as a user of its own, and the gate checks that user, so one
 module can't borrow another's list.
+
+One exception, for a module that asked for it and whose owner agreed ("abilities": "home_address"): a plain
+connection to the ONE home-network address its owner typed into its settings (``set_home``, ``_home``). The
+module never says where to: it asks for "home" and the gate dials the address it was given by the Matrix, after
+checking what that address really is (``home_reason``): never this Matrix itself, never the internet.
 """
 from __future__ import annotations
 
@@ -56,6 +61,76 @@ def public(address: str) -> bool:
     return ip.is_global and not ip.is_multicast
 
 
+HOME_NETS = [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")]
+HOME_AT_ONCE = 4            # connections a module may have open to its home-network address
+HOME_TRIES = 20             # ...and how many times it may try to connect in a minute
+HOME_TIMEOUT = 5            # s to reach a device on the home network (at most: a module may ask for less)
+# how each failure to reach a module's home-network address is told to it (bongo/sandbox/host.py turns these into
+# the exceptions docs/MODULES.md lists)
+HOME_FAILS = {"not_allowed": "403 Forbidden", "too_many": "429 Too Many Requests", "not_found": "404 Not Found", "refused": "502 Bad Gateway",
+              "no_route": "503 Service Unavailable", "no_answer": "504 Gateway Timeout"}
+
+
+def own_address(ip) -> bool:
+    """Whether ``ip`` is one of this Matrix's own addresses, on any of its networks (the setup hotspot's too):
+    only an address of its own can be bound to. Any doubt counts as its own."""
+    import errno
+    try:
+        with socket.socket(socket.AF_INET6 if ip.version == 6 else socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.bind((str(ip), 0))
+        return True
+    except OSError as error:   # not one of its addresses (or a kind of address it doesn't have at all)
+        return error.errno not in (errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT)
+
+
+def home_reason(address: str, own=own_address) -> str | None:
+    """Why ``address`` can't be a module's home-network address (None: it can). Only a private address of the
+    home network passes: not this Matrix (loopback, 0.0.0.0, any address of its own), not link-local
+    (169.254.x.x, fe80::, where routers and cloud machines keep their own services), not multicast or
+    broadcast (x.x.x.255 too), not IPv4 hidden inside IPv6, and not the internet (that is what "network" is for)."""
+    try:
+        ip = ipaddress.ip_address(address.split("%")[0])
+    except ValueError:
+        return "isn't an address"
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    if ip.is_loopback or ip.is_unspecified:
+        return "is this Matrix itself"
+    if isinstance(ip, ipaddress.IPv6Address) and any(ip in net for net in TUNNELS):
+        return "is an IPv4 address inside an IPv6 one, which isn't allowed"
+    if ip.is_link_local:
+        return "is a link-local address, which isn't allowed"
+    if ip.is_multicast or str(ip) == "255.255.255.255":
+        return "is a broadcast address"
+    if not any(ip in net for net in HOME_NETS):
+        return "is on the internet, not your home network" if ip.is_global else "isn't a home-network address"
+    if ip.version == 4 and ip.packed[3] == 255:
+        # the last address of a home network (192.168.1.255, and 10.255.255.255 for the whole block) reaches every
+        # device on it at once. Home networks are nearly always /24, so any x.x.x.255 counts as one
+        return "is a broadcast address: it reaches every device on the network at once"
+    if ip.version == 4 and ip.packed[3] == 0:
+        # the first address of a home network (192.168.1.0) names the network itself, never a device on it
+        return "is the address of a whole network, not of one device on it"
+    if own(ip):
+        return "is this Matrix itself"
+    return None
+
+
+def home_target(host: str, port: int, pinned: str | None = None, own=own_address) -> tuple[str | None, str]:
+    """The address to dial for a module's home-network address: (address, "") or (None, why not). A name is
+    looked up here, once, and the address that passed is the one dialled, so it can't change in between. Of the
+    addresses a name looks up to, only home-network ones count; ``pinned`` (the one used last time) is kept
+    while the name still gives it."""
+    try:
+        found = list(dict.fromkeys(i[4][0] for i in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)))
+    except (OSError, UnicodeError):
+        return None, f"couldn't find {host} on the network"
+    good = [a for a in found if home_reason(a, own) is None]
+    if not good:
+        return None, f"{host} {home_reason(found[0], own) if found else 'has no address'}"
+    return (pinned if pinned in good else good[0]), ""
+
+
 def connect(host: str, port: int, *, check_public=True) -> socket.socket:
     """Connect to a name's first internet address (looked up once, so it can't change in between)."""
     infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
@@ -86,6 +161,8 @@ class Gate:
         self.lock = threading.Lock()
         self.server = None
         self.check_public = True                    # (the tests turn this off to use a local web server)
+        self.homes: dict[str, dict] = {}            # id -> {"host", "port", "pin", "tries", "open", "said"}: its one
+        self.check_home = True                      # home-network address (...and this off, a local test server)
 
     def allow(self, module_id: str, sites: list[str], uid: int | None) -> None:
         with self.lock:
@@ -94,6 +171,29 @@ class Gate:
     def forget(self, module_id: str) -> None:
         with self.lock:
             self.modules.pop(module_id, None)
+
+    def set_home(self, module_id: str, host: str | None, port: int | None = None) -> None:
+        """The one home-network address ``module_id`` may connect to, as its owner typed it (None or "": none).
+        Changed or taken away, any connection it has to the old one is closed."""
+        with self.lock:
+            old = self.homes.get(module_id)
+            if host and old and (old["host"], old["port"]) == (host, port):
+                return
+            if host:
+                self.homes[module_id] = {"host": host, "port": int(port), "pin": None, "tries": [], "open": set(), "said": ""}
+            else:
+                self.homes.pop(module_id, None)
+        for s in list(old["open"]) if old else ():
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def home_said(self, module_id: str) -> dict | None:
+        """For the dashboard: the address it last connected to, or why it wasn't let through."""
+        with self.lock:
+            home = self.homes.get(module_id)
+            return {"pin": home["pin"], "said": home["said"]} if home else None
 
     def start(self) -> "Gate":
         if self.server:
@@ -226,6 +326,8 @@ class Gate:
             method, target, version = first.decode("ascii").split(" ")
         except ValueError:
             return self._refuse(client, "400 Bad Request", "not a web request")
+        if method == "HOME":                         # its one home-network address (never named by the module)
+            return self._home(client, module_id, rest, others)
         if method == "CONNECT":                      # https: a tunnel to host:port
             host, _, port = target.rpartition(":")
             host, port = host.strip("[]"), int(port) if port.isdigit() else 443
@@ -299,6 +401,92 @@ class Gate:
             threading.Thread(target=back, daemon=True).start()
             _pipe(client, out, None if send is None else body_left)
             done.wait(TIMEOUT)
+
+    def _home(self, client, module_id: str, rest: bytes, asked: bytes = b""):
+        """A plain connection to the module's home-network address, if it has one and the address is what it should
+        be. The bytes are passed on as they are: nothing in them is read, so nothing in them can redirect it.
+        Each way it can fail has a status of its own (``HOME_FAILS``), so the module can tell them apart; the
+        words are the same ones its card shows (``home_said``)."""
+        import errno
+        import time
+        wait = HOME_TIMEOUT                              # "Wait: 3": the module's own timeout, if shorter
+        for line in asked.split(b"\r\n"):
+            name, _, value = line.partition(b":")
+            if name.strip().lower() == b"wait":
+                try:
+                    wait = max(0.5, min(HOME_TIMEOUT, float(value.strip())))
+                except ValueError:
+                    pass
+        with self.lock:
+            home = self.homes.get(module_id)
+            if home is not None:
+                now = time.monotonic()
+                home["tries"] = [t for t in home["tries"] if now - t < 60]
+                if len(home["tries"]) <= HOME_TRIES:     # (one over is enough to know: the list never grows past that)
+                    home["tries"].append(now)
+                busy = len(home["tries"]) > HOME_TRIES or len(home["open"]) >= HOME_AT_ONCE
+                host, port, pinned = home["host"], home["port"], home["pin"]
+        if home is None:
+            return self._refuse(client, HOME_FAILS["not_allowed"], "no home-network address is set in its settings")
+        if busy:
+            return self._refuse(client, HOME_FAILS["too_many"], "too many connections to its home-network address: try again in a minute")
+        if self.check_home:
+            address, why = home_target(host, port, pinned)
+        else:                                            # (the tests' own server, on this computer)
+            try:
+                found = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+                found.sort(key=lambda a: a[0] != socket.AF_INET)   # IPv4 first: the tests' server listens there, wherever localhost points
+                address, why = found[0][4][0], ""
+            except OSError:
+                address, why = None, f"couldn't find {host} on the network"
+        if address is None:
+            with self.lock:
+                new, home["said"] = home["said"] != why, why
+            if new:
+                log.warning("module %s wasn't let through to its home-network address: %s", module_id, why)
+            return self._refuse(client, HOME_FAILS["not_found" if why.startswith("couldn't find") else "not_allowed"], why)
+        if address != pinned:
+            log.info("module %s: its home-network address %s is %s%s", module_id, host, address, f" (was {pinned})" if pinned else "")
+        try:
+            out = socket.create_connection((address, port), timeout=wait)   # the address that was checked, nothing looked up again
+        except OSError as error:
+            if isinstance(error, TimeoutError) or error.errno == errno.ETIMEDOUT:
+                kind, why = "no_answer", f"{host} didn't answer on port {port}"
+            elif error.errno == errno.ECONNREFUSED:
+                kind, why = "refused", f"{host} refused the connection on port {port}"
+            elif error.errno in (errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EHOSTDOWN):
+                kind, why = "no_route", f"there's no way to {host} from this Matrix just now (no route)"
+            else:
+                kind, why = "no_answer", f"couldn't reach {host}: {error.strerror or error}"
+            with self.lock:
+                home["pin"], home["said"] = address, why
+            return self._refuse(client, HOME_FAILS[kind], why)
+        with out:
+            with self.lock:
+                current = self.homes.get(module_id) is home          # (not changed in Settings while it was connecting)
+                if current:
+                    home["pin"], home["said"] = address, ""
+                    home["open"].add(out)
+            if not current:
+                return self._refuse(client, "403 Forbidden", "its home-network address has just changed")
+            try:
+                out.settimeout(None)
+                out.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                client.sendall(b"HTTP/1.1 200 Connected\r\n\r\n")
+                if rest:
+                    out.sendall(rest)
+                client.settimeout(None)
+                done = threading.Event()
+
+                def back():
+                    _pipe(out, client)
+                    done.set()
+                threading.Thread(target=back, daemon=True).start()
+                _pipe(client, out)
+                done.wait(2)                         # the module has hung up: a moment for the last of the answer, no more
+            finally:
+                with self.lock:
+                    home["open"].discard(out)
 
 
 def server_name(hello: bytes) -> str | None:

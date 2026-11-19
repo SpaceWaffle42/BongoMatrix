@@ -16,6 +16,9 @@ from PIL import Image
 from bongo.fonts import Fonts
 from bongo.pets import Pet
 
+API = 2   # what a module can count on from this Matrix. 2: ``Background``, ``Module.background``, ``home_connect``
+#           and ``Context.module_settings`` (docs/MODULES.md, "Background modules, controls and the home network")
+
 
 @dataclass
 class Context:
@@ -30,6 +33,7 @@ class Context:
     calendar: dict | None = None  # the Calendar screens' colour coding, set in Settings > Calendars (config.calendar_look)
     preview: bool = False  # True: a picture for the dashboard (possibly of a made-up moment), not the screen on the panel.
     #                        A module that keeps something going between frames must not let a preview move it on.
+    module_settings: dict = field(default_factory=dict)  # an imported module's own settings (its card in Settings), if it has any
 
     def now(self) -> dt.datetime:
         return dt.datetime.now(self.tz)
@@ -45,12 +49,16 @@ class Style:
     limits: dict = {}  # setting name -> (lowest, highest) for a number setting; anything outside is refused
     swatches: dict = {}  # setting name -> {choice: [colours]}, so the dashboard shows each choice's colours
     basic: tuple = ()  # this style's settings shown up front in the dashboard; the rest sit under Advanced
+    secrets: tuple = ()  # this style's settings that are secrets (a password, a token): never put in a backup (bongo/backup.py)
     group: str | None = None  # heading the dashboard files this style under (a Clock's "Digital", "Word"...)
     finished: bool = False  # set True in render to hand over to the next entry before its time is up
     busy: bool = False      # True: in the middle of something worth finishing (a line still scrolling); the
     #                         player keeps the screen up past its time until it isn't (at most player.OVERRUN)
     hand_over_at: float | None = None  # when the player means to hand over (a timestamp on ctx.now's clock): set by the
     #                            player, so a style knows not to start something new it would then have to finish
+    stay: bool = False      # True while something is live (a timer running, a live event): the player keeps the screen
+    #                         on past its time for as long as it is (at most player.STAY_MOST in any STAY_WINDOW, never
+    #                         in the sleep hours; Next still moves on). hand_over_at is None meanwhile: no end in sight
     once: bool = False      # set by the player: play through once, then hand over (splash, boot screen)
     fps: int = 30
 
@@ -68,6 +76,93 @@ class Style:
     def act(self, name: str) -> None:
         """Someone pressed one of the module's buttons (``Module.actions``) while this screen is on the panel.
         Called between frames: note what was asked and return at once; ``render`` shows it."""
+
+
+class Panel:
+    """What a background task may ask of the panel: ``Background.panel``. Each call only notes what is wanted;
+    the Matrix does it when ``tick`` returns, and only if the module's bongo-module.json asked for that control
+    ("abilities": "controls") and its owner agreed at import. Anything refused (not asked for, too often, a
+    value that isn't right) is in ``refused`` at the next tick: [{"do": "sleep", "why": "..."}]."""
+    MOST = 8   # asks per tick; any more are dropped
+
+    def __init__(self):
+        self.status: dict | None = None   # "status": {"asleep", "paused", "brightness", "brightness_by_hand", "screen", "module", "style"}
+        self.refused: list = []
+        self._asked: list = []
+
+    def _ask(self, do: str, **more) -> None:
+        if len(self._asked) < self.MOST:
+            self._asked.append({"do": do, **more})
+
+    def sleep(self, minutes: float | None = None) -> None:
+        """"sleep": Sleep now. ``minutes`` left out: until the sleep hours next start or end (a week, if there are none)."""
+        self._ask("sleep", **({} if minutes is None else {"minutes": minutes}))
+
+    def wake(self) -> None:
+        """"sleep": Wake now."""
+        self._ask("wake")
+
+    def brightness(self, value: int | None) -> None:
+        """"brightness": 1 to 100, as if set by hand; None: back to the Matrix's own."""
+        self._ask("brightness", value=value)
+
+    def pause(self) -> None:
+        """"playback"."""
+        self._ask("pause")
+
+    def resume(self) -> None:
+        """"playback"."""
+        self._ask("resume")
+
+    def next(self) -> None:
+        """"playback": on to the next screen."""
+        self._ask("next")
+
+    def message(self, text: str, title: str = "", seconds: float = 10) -> None:
+        """"message": a few words on the panel (up to 120 characters, a title up to 40) for 3 to 30 seconds."""
+        self._ask("message", text=text, title=title, seconds=seconds)
+
+
+class Background:
+    """An imported module's work that carries on while none of its screens is on the panel: pass the class as
+    ``Module(background=...)`` and ask for it in bongo-module.json ("abilities": {"background": true}).
+    It runs in the module's own process, started when the module is switched on and stopped when it is switched
+    off or removed. ``tick`` is called every ``every`` seconds and must come back quickly: one that takes over
+    5 seconds is taken for a hang, and the module's process is stopped and started again a little later."""
+    every: float = 5          # seconds between ticks (1 to 3600)
+
+    def __init__(self, settings: dict, panel: Panel):
+        self.settings = settings      # the module's own settings (its card in Settings), secrets included
+        self.panel = panel
+        self._status = None
+
+    def start(self) -> None:
+        """Once, before the first tick."""
+
+    def tick(self, now: dt.datetime) -> None:
+        """Every ``every`` seconds. Do a little and return."""
+
+    def settings_changed(self) -> None:
+        """``self.settings`` has just changed (someone saved the module's card)."""
+
+    def stop(self) -> None:
+        """The module is being switched off, removed or updated, or the Matrix is stopping: say goodbye (close a
+        connection, tell the far end you are going) in at most 2 seconds. Past that the process is stopped
+        anyway. Not called after a crash or a hang. The panel controls can't be used from here."""
+
+    def report(self, text: str, ok: bool = True) -> None:
+        """The module's one-line status in the dashboard ("Connected", or what's wrong in a few words: up to 80
+        characters). ``ok`` False shows it with the amber dot. "" takes it away."""
+        self._status = {"text": str(text), "ok": bool(ok)}
+
+
+def home_connect(timeout: float = 5.0):
+    """A connected TCP socket to the one home-network address this module's owner typed into its settings
+    (bongo-module.json: "abilities": {"home_address": {"ports": [...]}}). There is nothing to pass: the Matrix
+    dials the address and port in the settings, and nothing else on the home network can be reached. Raises
+    OSError (PermissionError when it isn't allowed, with the reason) if it can't. For TLS, wrap the socket."""
+    from bongo.sandbox import host
+    return host.home_connect(timeout)
 
 
 @dataclass(frozen=True)
@@ -147,10 +242,21 @@ class Module:
     # ("Add your OpenWeather API key"), or None. The dashboard shows it on those screens, beside the
     # Help guide; the screens themselves hand over at once meanwhile.
     trouble: Callable[[], str | None] | None = None
+    # ``secrets=("token",)``: shared settings that are secrets (a password, a token). They are never put in a
+    # backup (bongo/backup.py); a style lists its own in ``Style.secrets``.
+    secrets: tuple = ()
+    # ``needs(settings)``: what a screen with these settings needs that is kept outside its settings and that
+    # this Matrix doesn't have (a key, a sign-in, a link), with where to add it, as the end of the sentence
+    # "3 Weather screens need ...": "an OpenWeather key: skipped until you add one in Settings › Weather".
+    # None: nothing. Asked when a backup is restored, since none of those are ever in one.
+    needs: Callable[[dict], str | None] | None = None
+    # ``background``: a ``Background`` class, for an imported module that keeps working while none of its
+    # screens is on the panel (it may then have no styles at all). See docs/MODULES.md.
+    background: type | None = None
 
     @property
-    def default_style(self) -> str:
-        return next(iter(self.styles))
+    def default_style(self) -> str | None:
+        return next(iter(self.styles), None)   # (None: a module with no screens, only a background task)
 
     def settings_for(self, style: str | None = None, overrides: dict | None = None,
                      overlay: bool = False) -> dict:
@@ -183,8 +289,12 @@ class Module:
     def create(self, style: str | None = None, settings: dict | None = None,
                ctx: Context | None = None, overlay: bool = False) -> Style:
         ctx = ctx or Context()
-        settings = self.settings_for(style, self.homed(settings, ctx.home), overlay)
-        return self._style(style, overlay)(ctx, self.extend(settings, ctx) if self.extend else settings)
+        settings = self.settings_for(style, self.secreted(self.homed(settings, ctx.home)), overlay)
+        cls = self._style(style, overlay)
+        if self.secrets or getattr(cls, "secrets", ()):   # what it is handed is never to be in the log (bongo/standins.py)
+            from bongo import standins
+            standins.hush(settings.get(n) for n in (*self.secrets, *cls.secrets))
+        return cls(ctx, self.extend(settings, ctx) if self.extend else settings)
 
     def homed(self, settings: dict | None, home: dict | None) -> dict | None:
         """``settings`` with the Matrix's location (``home``) in each place setting, unless this screen
@@ -195,6 +305,18 @@ class Module:
         for name, (lat, lon) in self.places.items():
             out[name], out[lat], out[lon] = home["name"], home["latitude"], home["longitude"]
         return out
+
+    def secreted(self, settings: dict | None) -> dict | None:
+        """``settings`` with this module's shared secrets filled in. A secret every screen of the module shares
+        (``secrets`` on the Module: an API key) is kept once for the module, in a private file and never with a
+        screen (bongo/private.py); one that is a look's own (``Style.secrets``) is already among its screen's
+        settings (bongo/standins.py). Either way a screen finds it in ``self.settings``."""
+        if not self.secrets:
+            return settings
+        from bongo import private
+
+        kept = private.secrets_of(self)
+        return {**(settings or {}), **kept} if kept else settings
 
     def _style(self, style: str | None, overlay: bool = False) -> type[Style]:
         kinds = self.overlays if overlay else self.styles

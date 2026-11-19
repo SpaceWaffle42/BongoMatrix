@@ -74,7 +74,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .device-pill #device-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .device-pill .mono { font-size: 12px; }
 .dot { width: 8px; height: 8px; border-radius: 0; background: #4A505A; flex: none; }
-.dot.ok { background: var(--ok); } .dot.bad { background: var(--danger); }
+.dot.ok { background: var(--ok); } .dot.bad { background: var(--danger); } .dot.warn { background: var(--amber); }
 .demo-badge { padding: 2px 8px; border-radius: 0; border: 1px solid #3B4A66; color: var(--info); font-size: 12px; }
 .pill-warn { padding: 3px 10px; border-radius: 0; background: var(--amber-bg); color: var(--amber-hover); font-size: 12px; font-weight: 500; white-space: nowrap; }
 .tag { padding: 2px 8px; border-radius: 0; background: #1E2228; color: var(--soft); font-size: 12px; white-space: nowrap; }
@@ -254,6 +254,21 @@ input[type="time"] { color-scheme: dark; }
 .import-facts dt { color: var(--muted); } .import-facts dd { margin: 0; color: var(--soft); overflow-wrap: anywhere; }
 .import-facts a { color: var(--soft); }
 .site-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px; }
+/* what an imported module asks for beyond its screens (the import review, and its row), and its own settings card */
+.ask-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; border: 1px solid var(--line); }
+.ask-list li { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.ask-list li:first-child { border-top: 0; }
+.import-preview.no-screen { display: flex; align-items: center; justify-content: center; aspect-ratio: 2 / 1; border: 1px dashed var(--line-2); }
+.module-status { align-items: baseline; color: var(--soft); } .module-status .dot { transform: translateY(-1px); }
+.module-status[hidden] { display: none; }
+.fact-list { border: 1px solid var(--line); }
+.fact-row { display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; border-top: 1px solid var(--line); font-size: 13px; overflow-wrap: anywhere; }
+.fact-row:first-child { border-top: 0; } .fact-row .muted { flex: none; }
+.secret-field { display: flex; align-items: center; gap: 8px; min-height: 42px; flex-wrap: wrap; }
+.secret-field .input { flex: 1 1 120px; width: auto; }
+.secret-saved { display: inline-flex; align-items: baseline; gap: 8px; flex: 1 1 auto; min-width: 0; color: var(--text); }
+.module-card .field-col label { color: var(--soft); }
+.status-line { align-items: flex-start; } .status-line .dot { margin-top: 6px; }
 @media (max-width: 520px) { .module-row { grid-template-columns: 72px minmax(0, 1fr); gap: 8px; } }
 .module-row.flash { animation: module-flash 1.6s ease-out; }
 @keyframes module-flash { from { background: var(--amber-bg); } to { background: transparent; } }
@@ -290,6 +305,13 @@ body.drag-active { user-select: none; -webkit-user-select: none; }
 
 /* editor */
 .editor-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+.editor-head .panel-switch { margin-left: auto; }   /* Preview on the panel: beside the buttons */
+.preview-notices[hidden], .preview-banner[hidden] { display: none; }
+.preview-banner { display: flex; gap: 10px; align-items: flex-start; padding: 10px 14px; border: 1px solid var(--amber); background: var(--amber-bg); color: var(--amber); font-size: 13px; }
+.preview-banner .sq { width: 8px; height: 8px; flex: none; margin-top: 5px; background: var(--amber); }
+.preview-note { align-items: center; }
+.preview-note .grow { flex: 1 1 0; }
+.preview-note .btn { flex: none; }
 .crumb { display: inline-flex; align-items: center; gap: 4px; min-height: 40px; color: var(--muted); text-decoration: none; }
 .crumb:hover { color: var(--text); }
 .crumb-sep { color: #4A505A; }
@@ -347,6 +369,8 @@ body.drag-active { user-select: none; -webkit-user-select: none; }
 .arrange-item .handle { margin: 0; }
 .arrange-item .mini-btn { flex: none; width: 40px; }
 .arrange-empty { padding: 14px; border: 1px dashed var(--line-2); text-align: center; }
+.backup-box { border: 1px solid var(--line); padding: 12px; } .backup-box[hidden] { display: none; }
+.backup-file { overflow-wrap: anywhere; } .backup-box h3:focus { outline: none; } .backup-done { color: var(--ok); }
 .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; align-items: start; }
 /* Settings on one column: the cards' names in a row under the top bar, to jump between them */
 .jump-bar { display: none; position: sticky; top: 56px; z-index: 15; gap: 6px; overflow-x: auto; scrollbar-width: none; margin: 0 -28px; padding: 8px 28px; background: var(--page); border-bottom: 1px solid var(--line); }
@@ -467,6 +491,7 @@ body.drag-active { user-select: none; -webkit-user-select: none; }
   .btn.play { width: 48px; }
   .pl-card { width: 198px; }   /* four 40 px buttons across */
   .add-tile { width: 120px; }
+  .editor-head .panel-switch { order: 3; margin-left: 0; flex-basis: 100%; }   /* under the buttons, its notice next */
   .editor-preview { order: -1; position: sticky; top: 57px; z-index: 5; flex-basis: 100%; }
   .editor-preview .note { display: none; }
   .editor-preview .card { padding: 10px; gap: 8px; background: var(--card); }   /* opaque: the form scrolls under it */

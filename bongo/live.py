@@ -18,6 +18,8 @@ from dataclasses import asdict
 
 from PIL import Image
 
+from bongo.panelpreview import PanelPreview
+
 
 FROZEN_SECONDS = 180   # no frame for this long means the player is stuck (the slowest honest wait, a video
                        # being decoded on a Pi Zero, is capped at 120 s)
@@ -53,11 +55,17 @@ class Live:
         self._brightness_new = False        # set by hand since the player last looked: it says how long it lasts
         self._brightness_given = False      # ...unless whoever set it gave its end (kept whatever the settings say)
         self.level: int | None = None       # the brightness the player has the panel at, or gliding to (by hand or not)
+        self.staying = False        # the screen on now says it is live, so it keeps the panel past its time (Style.stay)
+        self.stays: dict = {}       # module -> [(when, seconds kept)]: what each has had of its allowance (bongo/player.py)
         self.pushes: collections.deque = collections.deque(maxlen=5)
         self.overlay = None         # callable(frame) -> frame, e.g. the pairing PIN
         self.index = None           # playlist position on now (None for splash, sleep, pushes)
         self.reload = threading.Event()  # config saved: the player restarts with it
         self.acts: collections.deque = collections.deque(maxlen=8)   # (module, name, when): buttons pressed (Module.actions)
+        # the screen editor's "Preview on the panel": an unsaved draft the player draws over the playlist for a while
+        self.preview = PanelPreview(on_end=self._preview_ended)
+        self.mask = None            # callable(entry as a dict) -> the same without its secret settings (bongo/standins.py):
+        #                             set by the dashboard, so nothing ``status`` says can carry one
 
     # -- player side -------------------------------------------------------------------
     def playing(self, entry, upcoming, index=None) -> None:
@@ -114,6 +122,8 @@ class Live:
         return names
 
     def take_push(self):
+        if self.pushes and self.preview.active:
+            return None         # a draft is being previewed on the panel: the message waits until that ends
         with self._lock:
             if not self.pushes:
                 return None
@@ -154,6 +164,7 @@ class Live:
 
     def apply_config(self) -> None:
         """Ask the player to restart from the saved config (safe area, playlist, schedule)."""
+        self.preview.end("saved")   # a previewed draft was built for the config as it was: Save ends it
         self.reload.set()
         self.skip.set()
 
@@ -200,9 +211,18 @@ class Live:
             return self.brightness
 
     def push(self, entry) -> None:
+        held = self.preview.active   # (a draft on the panel: the message shows when that ends, see take_push)
         with self._lock:
             self.pushes.append(entry)
-            self.skip.set()  # interrupt whatever is on now
+            if not held:
+                self.skip.set()  # interrupt whatever is on now
+        if held and not self.preview.active:
+            self._preview_ended()    # (it ended just then: nobody else would bring the message on)
+
+    def _preview_ended(self) -> None:
+        """The panel is the playlist's again: a message pushed meanwhile cuts in now, as it would have."""
+        if self.pushes:
+            self.skip.set()
 
     def status(self) -> dict:
         with self._lock:
@@ -210,7 +230,10 @@ class Live:
         until = self.sleep_until  # read once: the player may clear it meanwhile
         by_hand, hand_until = self.brightness, self.brightness_until
         def describe(e):
-            return None if e is None else {k: v for k, v in asdict(e).items() if k != "enabled"}
+            if e is None:
+                return None
+            told = {k: v for k, v in asdict(e).items() if k != "enabled"}
+            return self.mask(told) if self.mask else told
         return {
             "entry": describe(entry), "next": describe(upcoming), "index": index,
             "elapsed": round(time.time() - started, 1) if entry else 0,
@@ -222,5 +245,7 @@ class Live:
             "asleep": bool(until) or self.sleeping,
             "sleep_hours": self.sleep_hours,
             "idle": self.idle,
+            "staying": self.staying,
             "pushes": len(self.pushes),
+            "preview": self.preview.public(),   # a draft from the editor is on the panel: who, and which screen
         }

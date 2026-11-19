@@ -31,6 +31,7 @@ export function render(view) {
   const editBtn = h('button', { type: 'button', class: 'btn ghost' }, 'Edit');
   const safeBtn = h('button', { type: 'button', class: 'chip', 'aria-pressed': String(showSafe) }, 'Safe area');
   const stateNote = h('p', { class: 'muted small hero-note', 'aria-live': 'polite' });
+  const onNow = h('div', { class: 'eyebrow' }, 'On the panel now');   // (not while the editor is previewing a draft on the panel)
   const progress = h('div', { class: 'progress' }, h('div', { class: 'progress-track' }, bar),
     h('div', { class: 'row between mono small muted' }, elapsedEl, nextEl));
   // the module's own buttons (its ``actions``: an aquarium's Feed), only while it is the one on the panel
@@ -65,7 +66,7 @@ export function render(view) {
 
   const hero = h('section', { class: 'card hero', 'aria-label': 'Now playing' },
     h('div', { class: 'row between wrap' },
-      h('div', null, h('div', { class: 'eyebrow' }, 'On the panel now'), h('div', { class: 'row gap-s' }, title, styleTag)),
+      h('div', null, onNow, h('div', { class: 'row gap-s' }, title, styleTag)),
       safeBtn),
     h('div', { class: 'led-frame' }, canvas),
     progress,
@@ -113,7 +114,7 @@ export function render(view) {
     if (!msg.value.trim()) { msg.focus(); toast('Type a message first', 'error'); return; }
     try {
       await post('/api/push', { text: msg.value.trim(), title: ttl.value.trim(), seconds: Number(secs.value) });
-      toast('Message sent to the panel', 'success'); msg.value = ''; ttl.value = '';
+      toast(live().preview ? 'Message queued: it shows when the preview on the panel ends' : 'Message sent to the panel', 'success'); msg.value = ''; ttl.value = '';
     } catch (err) { fail("Couldn't push the message")(err); }
   });
 
@@ -151,9 +152,17 @@ export function render(view) {
     const i = playingIndex(S.draft || []);
     editBtn.hidden = i < 0;
     editBtn.textContent = `Edit ${entryName(e)}`;
-    stateNote.textContent = [idle && soonest && `${entryName(soonest.x)} plays next, at ${soonest.at}.`,
+    const stays = L.staying && !L.paused && e && `${entryName(e)} is live, so it stays on until it's over. Next moves on.`;   // (Style.stay)
+    // Preview on the panel (the editor): the panel shows someone's unsaved draft; this picture stays the playlist underneath
+    const pv = L.preview;
+    onNow.textContent = pv ? 'Under a preview on the panel' : 'On the panel now';
+    stateNote.textContent = [stays, pv && `The panel is showing a preview of ${entryName(pv)} from the editor${pv.by ? ` (${pv.by})` : ''}. The picture here is the playlist under it.`,
+      idle && soonest && `${entryName(soonest.x)} plays next, at ${soonest.at}.`,
       L.paused && 'Rotation paused: this module stays on until you resume.',
-      asleep && (wakesAt ? `Asleep until ${wakesAt}.` : 'Asleep.'), L.pushes && `${L.pushes} message${L.pushes > 1 ? 's' : ''} queued.`].filter(Boolean).join(' ');
+      asleep && (wakesAt ? `Asleep until ${wakesAt}.` : 'Asleep.'), L.pushes && `${L.pushes} message${L.pushes > 1 ? 's' : ''} queued.`,
+      // an imported module with the sleep or brightness control did it (bongo/controls.py): say which
+      asleep && S.state?.set_by?.sleep && `Put to sleep by ${S.state.set_by.sleep}.`,
+      S.state?.set_by?.brightness && `Brightness set by ${S.state.set_by.brightness}. A brightness set by hand stays until you switch back to Auto; with Follow daylight on (Settings > Device) it also ends by itself at the next sunrise, sunset or sleep change.`].filter(Boolean).join(' ');
     if (Date.now() - sliderTouched > 2500 && document.activeElement !== slider) {
       const auto = L.brightness == null;
       // Follow daylight (Settings > Device): Auto is wherever the daylight has it now, and one set by hand
@@ -181,11 +190,13 @@ export function render(view) {
   }
   function tick() {
     const L = live(), e = L.entry;
-    const el = Math.min(e?.seconds || 0, (L.elapsed || 0) + (L.paused ? 0 : (performance.now() - S.polledAt) / 1000));
+    const run = (L.elapsed || 0) + (L.paused ? 0 : (performance.now() - S.polledAt) / 1000);
+    const el = Math.min(e?.seconds || 0, run);
+    const staying = !!L.staying && !L.paused;   // the screen says it's live: it keeps the panel past its seconds
     bar.style.width = e?.seconds ? `${Math.min(100, (el / e.seconds) * 100)}%` : '0';
-    elapsedEl.textContent = `${mmss(el)} / ${mmss(e?.seconds || 0)}`;
+    elapsedEl.textContent = staying && run > el ? `${mmss(run)} on` : `${mmss(el)} / ${mmss(e?.seconds || 0)}`;
     const left = (e?.seconds || 0) - el;   // (none left: the screen is finishing a line that scrolls)
-    nextEl.textContent = L.paused ? 'Paused' : L.next ? `Next: ${entryName(L.next)} ${left >= 1 ? `in ${mmss(left)}` : 'in a moment'}` : '';
+    nextEl.textContent = L.paused ? 'Paused' : staying ? "Live: staying on" : L.next ? `Next: ${entryName(L.next)} ${left >= 1 ? `in ${mmss(left)}` : 'in a moment'}` : '';
   }
   const timer = setInterval(tick, 250);
   bus.addEventListener('state', paint);
@@ -458,7 +469,7 @@ function buildAddDialog() {
   return {
     el: dlg,
     open() {
-      modSel.replaceChildren(...(S.modules || []).filter((m) => !moduleOff(m.id)).map((m) => h('option', { value: m.id }, m.proposed ? `${m.name} (proposed)` : m.name)));
+      modSel.replaceChildren(...(S.modules || []).filter((m) => !moduleOff(m.id)).filter((m) => m.default_style).map((m) => h('option', { value: m.id }, m.proposed ? `${m.name} (proposed)` : m.name)));
       modSel.dispatchEvent(new Event('change'));
       dlg.returnValue = '';
       if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');

@@ -19,6 +19,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from bongo import standins  # noqa: F401  (on import: no log line carries a secret, whatever a module prints)
 from bongo.module import Module, Style
 from bongo.sandbox import jail, wire
 
@@ -40,6 +41,8 @@ class Busy(ChildError):
 
 
 FRAME_LOCK_WAIT = 0.25  # s a frame waits for its child; busy longer, the screen keeps its last frame
+STAY_QUIET = 5.0        # s without a frame of its own (its child busy with another screen) before a screen that said
+                        # it was live (Style.stay) is no longer kept on the panel for it
 IDLE = 10 * 60          # s with only previews asking and none for this long: the child is stopped (started again
                         # when next needed)
 PANEL_IDLE = 30 * 60    # ...and one that has had a screen on the panel, this long after its last frame: round a
@@ -84,6 +87,7 @@ class _Writer:
 
 
 MOST_LINES = 20       # lines of a module's output logged per 10 s (the rest is skipped)
+MOST_NOTE = 400       # characters of a note under one of its settings (Module.notes) that the dashboard shows
 MOST_MEMORY = 300 << 20
 MOST_DISK = 100 << 20   # bytes a module may keep in its data folder: over that it's stopped and the folder emptied
                         # (each file has its own limit, jail.LIMITS, but nothing else stopped it filling the SD card)
@@ -104,6 +108,7 @@ class Child:
         self.asked = 0            # each request's number; its answer must carry it
         self.used = time.monotonic()   # when a screen or preview last asked it for anything (``IDLE``)
         self.on_panel = False          # it has drawn a screen for the panel, not only previews
+        self.kept = False              # it has a background task (bongo/sandbox/background.py): never stopped for being idle
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -157,7 +162,7 @@ class Child:
                     window, count = time.monotonic(), 0
                 count += 1
                 if count <= MOST_LINES:
-                    log.info("[%s] %s", self.spec["id"], line[:500].decode("utf-8", "replace").rstrip())
+                    log.info("[%s] %s", self.spec["id"], self._said(line[:500].decode("utf-8", "replace").rstrip()))
                 elif count == MOST_LINES + 1:
                     log.info("[%s] (more output skipped)", self.spec["id"])
 
@@ -176,7 +181,13 @@ class Child:
             self._crashed(f"{error}")
             raise ChildError(str(error)) from None
 
+    def _said(self, text) -> str:
+        """What the module printed or said went wrong, fit for the log: never with one of its secrets in it."""
+        from bongo import private
+        return private.hide(self.spec.get("module_id", self.spec["id"]), text)
+
     def _crashed(self, why: str):
+        why = self._said(why)
         self.error = why
         self.crashes = [t for t in self.crashes if time.monotonic() - t < REST] + [time.monotonic()]
         log.warning("module %s stopped: %s", self.spec["id"], why)
@@ -191,7 +202,7 @@ class Child:
                 self._start()
             header, data = self._exchange(msg, wait, most_body)
             if not header.get("ok"):
-                raise ChildError(header.get("error", "failed"))
+                raise ChildError(self._said(header.get("error", "failed")))
             return (header, data) if body else header
         finally:
             self.lock.release()
@@ -259,7 +270,7 @@ def _watch(c: Child):
                 continue
             for w in now:
                 idle = PANEL_IDLE if w.on_panel else IDLE
-                if time.monotonic() - w.used > idle and w.lock.acquire(blocking=False):
+                if not w.kept and time.monotonic() - w.used > idle and w.lock.acquire(blocking=False):
                     try:                             # (never while a screen is asking it something)
                         if time.monotonic() - w.used > idle:
                             log.info("module %s: not used for a while, stopped until it's next needed", w.spec["id"])
@@ -334,6 +345,12 @@ class RemoteStyle(Style):
                      # and where you live is one of them. A module that needs a place asks for it in its own settings
                      "seed": self.ctx.rng.getrandbits(32), "home": None, "calendar": self.ctx.calendar,
                      "preview": self.ctx.preview}
+        own = self.spec.get("settings")           # the module's own settings (its card in Settings), read-only
+        if own is True:
+            from bongo.abilities import STORE
+            self.info["module_settings"] = STORE.values(self.spec["id"])   # (its saved secrets among them)
+        elif isinstance(own, dict):               # (on the import's test screen: their defaults, never what was typed)
+            self.info["module_settings"] = own
         self._create()
 
     def _create(self):
@@ -345,7 +362,7 @@ class RemoteStyle(Style):
             self.handle, self.generation = header["h"], self.child.generation
             weakref.finalize(self, self.child.close, self.handle, self.generation)
         except ChildError as error:
-            log.warning("module %s, %s: couldn't start: %s", self.spec["id"], self.style_name, error)
+            log.warning("module %s, %s: couldn't start: %s", self.spec["id"], self.style_name, self.child._said(error))
             self.finished = True
 
     most_overrun = 60.0   # s an imported screen may stay past its time while busy (a built-in one: player.OVERRUN)
@@ -356,13 +373,13 @@ class RemoteStyle(Style):
         try:
             self.child.call({"op": "act", "h": self.handle, "name": name}, FRAME_WAIT)
         except ChildError as error:
-            log.warning("module %s, %s: the %s button: %s", self.spec["id"], self.style_name, name, error)
+            log.warning("module %s, %s: the %s button: %s", self.spec["id"], self.style_name, name, self.child._said(error))
 
     def render(self, now):
         if self.handle is not None and (self.generation != self.child.generation or not self.child.alive()):
             self._create()          # its child was restarted (switched back on, a setting changed): start again there
         if self.handle is None:
-            self.finished = True
+            self.finished, self.stay = True, False
             return self.blank
         try:
             header, data = self.child.call({"op": "render", "h": self.handle, "now": now.isoformat(), "hand_over_at": self.hand_over_at}, FRAME_WAIT, body=True,
@@ -370,17 +387,26 @@ class RemoteStyle(Style):
             if data is None or len(data) != self.ctx.width * self.ctx.height * 3:
                 raise ChildError("a frame of the wrong size")
             self.finished, self.busy = bool(header.get("finished")), bool(header.get("busy"))
+            # (live: said afresh with every frame; only for a module allowed to, its spec's "stay": with abilities,
+            # one whose bongo-module.json asks for it and whose owner was told so at import)
+            self.stay, self.answered = bool(header.get("stay")) and self.spec.get("stay", True) is not False, time.monotonic()
             self.last = Image.frombytes("RGB", (self.ctx.width, self.ctx.height), data)
             return self.last
         except Busy:
             # another screen of this module has its child (a preview being set up): this one is fine, it shows
             # its last frame again and asks next frame, rather than going black and ending
+            if self.stay and time.monotonic() - getattr(self, "answered", 0.0) > STAY_QUIET:
+                self.stay = False   # ...but it isn't kept on the panel for something it can no longer show
             return getattr(self, "last", self.blank)
         except ChildError as error:
-            log.warning("module %s, %s: %s", self.spec["id"], self.style_name, error)
+            log.warning("module %s, %s: %s", self.spec["id"], self.style_name, self.child._said(error))
             self.handle = None
-            self.finished = True
+            self.finished, self.stay = True, False   # stopped answering: it loses the panel at once, live or not
             return self.blank
+
+
+def _dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
 
 
 def build(described: dict, spec: dict) -> Module:
@@ -390,10 +416,13 @@ def build(described: dict, spec: dict) -> Module:
         styles[name] = type(f"Remote_{described['id']}_{name}", (RemoteStyle,), {
             "spec": spec, "style_name": name, "defaults": s.get("defaults") or {}, "choices": s.get("choices") or {},
             "limits": {k: tuple(v) for k, v in (s.get("limits") or {}).items()}, "swatches": s.get("swatches") or {},
-            "basic": tuple(s.get("basic") or ()), "group": s.get("group"), "fps": int(s.get("fps") or 10)})
+            "basic": tuple(s.get("basic") or ()), "group": s.get("group"), "fps": int(s.get("fps") or 10),
+            "secrets": tuple(s.get("secrets") or ())})
     return Module(id=described["id"], name=described["name"], styles=styles, defaults=described.get("defaults") or {},
+                  notes={str(k): str(v)[:MOST_NOTE] for k, v in _dict(described.get("notes")).items()},
                   description=described.get("description") or "", choices=described.get("choices") or {},
                   limits={k: tuple(v) for k, v in (described.get("limits") or {}).items()},
                   basic=tuple(described.get("basic") or ()), item_fields=described.get("item_fields") or {},
                   suggestions=described.get("suggestions") or {}, choice_names=described.get("choice_names") or {},
-                  help=described.get("help") or None, actions=described.get("actions") or {})
+                  help=described.get("help") or None, actions=described.get("actions") or {},
+                  secrets=tuple(str(n) for n in described.get("secrets") or ()))

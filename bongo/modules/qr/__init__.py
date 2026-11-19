@@ -161,6 +161,7 @@ class WifiGuests(Base):
     defaults = {"network": "Guest", "password": "", "security": "WPA", "label": "SCAN FOR WIFI"}
     choices = {"security": ["WPA", "WEP", "none"]}
     basic = ("network", "password", "label")
+    secrets = ("password",)   # never in a backup: typed in again after a restore
 
     def render(self, now):
         s = self.settings

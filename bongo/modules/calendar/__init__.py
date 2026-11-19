@@ -94,4 +94,7 @@ MODULE = Module(
     item_fields={"events": countdown.EVENT_FIELDS},
     renames={"countdown": {"days": "countdown_days", "clock": "countdown_clock", "flip": "countdown_flip",
                            "ring": "countdown_ring", "tearoff": "countdown_tearoff", None: "countdown_days"}},
+    # (said when a backup is restored: a calendar's link is never in one)
+    needs=lambda settings: None if not settings.get("linked_calendars", True) or calendars.load() else
+    "linked calendars (Google, iPhone), and none are linked here: links are never in a backup, so add yours in Settings › Calendars",
 )

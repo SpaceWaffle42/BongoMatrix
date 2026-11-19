@@ -9,8 +9,11 @@ export class ApiError extends Error {
   constructor(status, message, data) { super(message); this.status = status; this.data = data; }
 }
 
-/** Set by app.js: called whenever any request comes back 401. */
-export const hooks = { unauthorized() {} };
+/** Set by app.js: called whenever any request comes back 401. ``secrets(entry)``: the names of the secret
+ *  settings that screen keeps with it (app.js knows the modules). */
+export const hooks = { unauthorized() {}, secrets() { return []; } };
+/** What a page holds in place of a secret saved with a screen (bongo/standins.py): it says one is saved, not what it is. */
+export const SAVED = /^\(saved:[0-9a-f]{20}\)$/;
 
 /** ms a request may take before it's given up. One that never answered (a half-open Wi-Fi connection, a stalled
  *  Pi) used to wait for ever: the status poll stopped for good with the dot still green, and Apply said nothing. */
@@ -86,7 +89,11 @@ export async function image(path) {
 }
 
 export function previewPath(entry, t = Date.now() / 1000) {
+  // an address must never carry a secret someone has just typed: the preview is drawn without it until it is
+  // applied (a saved one travels as its stand-in, which the Matrix swaps back)
+  const typed = hooks.secrets(entry).filter((n) => entry.settings?.[n] && !SAVED.test(entry.settings[n]));
+  const settings = typed.length ? Object.fromEntries(Object.entries(entry.settings).filter(([k]) => !typed.includes(k))) : entry.settings;
   const q = new URLSearchParams({ module: entry.module, style: entry.style || '',
-    settings: JSON.stringify(entry.settings || {}), t: t.toFixed(3) });
+    settings: JSON.stringify(settings || {}), t: t.toFixed(3) });
   return `/api/preview.png?${q}`;
 }

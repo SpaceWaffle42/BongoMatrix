@@ -30,4 +30,6 @@ MODULE = Module(
                          "(1 to 4: every step; 6: every other one)."},
     help=HELP,
     trouble=data.trouble,   # no key, or one that doesn't work: the screens skip themselves, and the dashboard says why
+    # (said when a backup is restored: a key is never in one)
+    needs=lambda settings: None if data.keys.get() else "an OpenWeather key: skipped until you add one in Settings › Weather",
 )

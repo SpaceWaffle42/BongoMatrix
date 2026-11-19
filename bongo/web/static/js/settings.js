@@ -7,19 +7,22 @@ import { S, onLeave, go, saveConfig, moduleById } from './app.js';
 import { helpButton, creditLine } from './help.js';
 import { placePicker } from './editor.js';
 import { lookEditor, keepState, comingUpCard, icons, NAMES as COLOUR_NAMES } from './calendarlook.js';
-import { importBox, importedMore, addons } from './modimport.js';
+import { importBox, importedMore, addons, paintStatus } from './modimport.js';
+import { moduleCards } from './modsettings.js';
 import { DEMO } from './api.js';
 import * as deeplink from './deeplink.js';
 import { brightnessBox } from './daylight.js';
+import { backupCard } from './backup.js';
 
 /** The cards, by a name that never changes (their order is saved on the Matrix: config ``settings_layout``). */
 const CARDS = [['safe_area', () => safeAreaCard()], ['device', () => deviceCard()], ['modules', () => modulesCard()],
   ['location', () => locationCard()], ['wifi', () => wifiCard()], ['pet', () => petCard()], ['calendars', () => calendarsCard()],
   ['spotify', () => spotifyCard()], ['weather', () => weatherCard()], ['update', () => updateCard()], ['devices', () => devicesCard()], ['sleep', () => sleepCard()],
-  ['splash', () => splashCard()], ['media', () => mediaCard()], ['coming_up', () => comingUpCard(Object.keys(COLOUR_NAMES))]];
+  ['splash', () => splashCard()], ['media', () => mediaCard()], ['coming_up', () => comingUpCard(Object.keys(COLOUR_NAMES))],
+  ['backup', () => backupCard()]];
 /** As it was before cards could be moved: the safe area across the top, two columns, Coming up across the bottom. */
 const DEFAULT_LAYOUT = { top: ['safe_area'], left: ['device', 'modules', 'location', 'wifi', 'pet', 'calendars', 'spotify', 'weather', 'update'],
-  right: ['devices', 'sleep', 'splash', 'media'], full: ['coming_up'] };
+  right: ['devices', 'sleep', 'splash', 'media', 'backup'], full: ['coming_up'] };
 const ZONES = ['top', 'left', 'right', 'full'];
 const ZONE_NAMES = { top: 'Across the top', left: 'Left column', right: 'Right column', full: 'Across the bottom' };
 
@@ -40,7 +43,7 @@ export function render(view) {
   const place = (layout) => {                         // the same cards, moved: nothing typed in them is lost
     for (const z of ZONES) holders[z].replaceChildren(...layout[z].map((id) => built[id]));
     holders.top.hidden = !layout.top.length; holders.full.hidden = !layout.full.length;   // an empty place adds no gap
-    bar.follow(ZONES.flatMap((z) => layout[z]).map((id) => built[id]));
+    bar.follow(ZONES.flatMap((z) => layout[z]).flatMap((id) => built[id].jump?.() || [built[id]]));   // (Modules: its card, then each imported module's own)
   };
   place(layoutOf(S.config.settings_layout));
   const page = h('div', { class: 'view-part' },
@@ -345,8 +348,10 @@ function modulesCard() {
   const screens = (n) => `${n} screen${n === 1 ? '' : 's'}`;
   const note = (m, on) => {
     const n = uses(m.id);
-    if (on) return n ? `Used by ${screens(n)}` : 'Not in the playlist';
-    return n ? `Off: hidden from Add a module, its ${screens(n)} skipped` : 'Off: hidden from Add a module';
+    const background = imported[m.id]?.background;   // an imported module that keeps working with none of its screens showing
+    if (!m.default_style) return on ? 'On: it works in the background (it has no screen)' : 'Off: not running';
+    if (on) return (n ? `Used by ${screens(n)}` : 'Not in the playlist') + (background ? ', and working in the background' : '');
+    return (n ? `Off: hidden from Add a module, its ${screens(n)} skipped` : 'Off: hidden from Add a module') + (background ? ', not running' : '');
   };
   let busy = false;   // one save at a time, so two quick taps can't undo each other
   let imported = {};  // id -> what /api/addons says of it
@@ -374,6 +379,8 @@ function modulesCard() {
       label.textContent = now ? 'On' : 'Off';
       r.classList.toggle('off', !now);
       status.textContent = note(m, now);
+      if (saved && m.settings_card) own.refresh([m.id]);   // its own card says whether it's running
+      if (saved && imported[m.id]?.background) { const line = r.querySelector('.module-status'); if (line) paintStatus(line, null); }
     });
     sw.setAttribute('aria-label', m.name);
     const info = imported[m.id];
@@ -396,20 +403,36 @@ function modulesCard() {
   function changed(res, removed) {
     if (removed) S.modules = (S.modules || []).filter((m) => m.id !== removed);
     show(res);
-    if (removed) importer.button.focus();   // its row has gone: focus somewhere sensible
+    if (removed) { own.refresh(); importer.button.focus(); }   // its row has gone: focus somewhere sensible
   }
+  const own = moduleCards();   // a card of its own for each imported module with settings of its own (js/modsettings.js)
   const importer = importBox(async (id) => {
     try { S.modules = await get('/api/modules'); } catch { /* the list below catches up on the next load */ }
+    own.refresh([id]);          // (installed or updated: its card is made again from what this version declares)
     show(await addons(true));
     const added = list.querySelector(`[data-module="${CSS.escape(id)}"]`);
     if (added) { added.classList.add('flash'); added.querySelector('.switch')?.focus(); added.scrollIntoView({ block: 'nearest' }); }
   });
   draw();
   addons().then(show);
-  return h('section', { class: 'card stack', 'aria-label': 'Modules', id: 'modules' },
+  // the status lines of modules working in the background, kept fresh (only those lines: nothing else is redrawn)
+  const fresh = setInterval(async () => {
+    if (document.hidden || !Object.values(imported).some((i) => i.background)) return;
+    const res = await addons(true);
+    for (const i of res.modules) {
+      const line = list.querySelector(`[data-module="${CSS.escape(i.id)}"] .module-status`);
+      if (line) paintStatus(line, (S.config.modules_off || []).includes(i.id) ? null : i.status);
+    }
+  }, 10000);
+  onLeave(() => clearInterval(fresh));
+  const card = h('section', { class: 'card stack', 'aria-label': 'Modules', id: 'modules' },
     h('div', { class: 'row between wrap gap-s' }, h('h2', { class: 'h2' }, 'Modules'), importer.button),
     h('p', { class: 'muted small flush' }, "Switch a module off to leave it out: its screens are skipped in the playlist and overlays, and it isn't offered in Add a module. Its screens and settings are kept for when you switch it back on. Splash, sleep and Show on the Matrix have their own switches."),
     importer.panel, loose, list);
+  // one place on the page (and in Rearrange) for Modules and the cards of the imported modules under it
+  const all = h('div', { class: 'stack gap-20 min0', 'aria-label': 'Modules' }, card, own.box);
+  all.jump = () => [card, ...own.cards()];   // ...each with its own name in the phone's jump bar
+  return all;
 }
 
 /** Where the Matrix is: every weather and sky screen uses it, unless one is given its own place. */

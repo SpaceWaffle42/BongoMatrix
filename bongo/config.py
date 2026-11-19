@@ -138,7 +138,8 @@ def playlist(config: dict, modules: dict[str, Module]) -> list[Entry]:
     off = modules_off(config)
     entries = [Entry(**{**e, "enabled": e.get("enabled", True) and e["module"] not in off})
                for e in config["playlist"] if isinstance(e, dict)]   # (validate() reports anything else)
-    return entries or [Entry(module=m) for m in list(modules) if m not in off]   # (a copy: an import may change it)
+    return entries or [Entry(module=m) for m, module in list(modules.items())    # (a copy: an import may change it)
+                       if m not in off and module.styles]                         # (one with no screens has nothing to play)
 
 
 def safe_area(config: dict) -> SafeArea:
@@ -169,6 +170,14 @@ OVERLAY_KEYS = {"module", "overlay", "every", "seconds", "offset", "settings", "
 PANEL = {"rows": (8, 128), "cols": (8, 256), "gpio_slowdown": (0, 5), "brightness": (1, 100), "limit_refresh": (0, 1000),
          "chain_length": (1, 8), "parallel": (1, 3)}
 ENTRY_KEYS = {"module", "style", "seconds", "settings", "enabled", "times"}
+MODULE_ID = re.compile(r"[a-z][a-z0-9_]{0,31}")   # what a module's id can look like (bongo/addons.py's are tighter)
+MOST_PARKED = 40   # screens a playlist may keep for modules this Matrix doesn't have (switched off: see _entry)
+
+
+def module_id(value) -> bool:
+    """Whether ``value`` can be a module's id at all: the screens kept for a module that isn't installed are only
+    ever ones whose name could be one (never a path, a dunder, an essay or HTML)."""
+    return isinstance(value, str) and MODULE_ID.fullmatch(value) is not None and not value.startswith("_")
 MOST_TIMES = 4   # times of day one playlist entry may have (Timing > When it plays)
 _CLOCK = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
 
@@ -184,7 +193,10 @@ def _entry(where: str, raw, modules: dict[str, Module]) -> list[str]:
         return [f"{where}: must be an object"]
     if unknown := set(raw) - ENTRY_KEYS:
         return [f"{where}: unknown keys {sorted(unknown)}"]
-    if raw.get("module") not in modules:
+    # a screen kept for a module this Matrix doesn't have (restored from a backup made where an add-on was
+    # installed, bongo/backup.py): fine while it's switched off, as it is then never played
+    parked = raw.get("module") not in modules and raw.get("enabled") is False and module_id(raw.get("module"))
+    if raw.get("module") not in modules and not parked:
         return [f"{where}: unknown module {raw.get('module')!r}"]
     if "seconds" in raw and not _number(raw["seconds"], 1, 3600):
         return [f"{where}: seconds must be a number from 1 to 3600"]
@@ -194,11 +206,25 @@ def _entry(where: str, raw, modules: dict[str, Module]) -> list[str]:
         return [f"{where}: settings must be an object and style a name"]
     if "times" in raw and (problem := _times(raw["times"])):
         return [f"{where}: {problem}"]
+    if parked:
+        return []
     try:
         modules[raw["module"]].settings_for(raw.get("style"), raw.get("settings", {}))
     except ValueError as error:
         return [f"{where}: {error}"]
+    if kept := sorted(set(raw.get("settings", {})) & set(modules[raw["module"]].secrets)):
+        return [f"{where}: {kept[0]} is a secret: it is saved on its own, never with the screen"]   # (bongo/private.py)
+    from bongo import standins
+    if lost := standins.stand_ins(modules[raw["module"]], raw.get("style"), raw.get("settings", {})):
+        # (what a browser is sent in place of a secret saved with a screen: never a value to save)
+        return [f"{where}: {lost[0].replace('_', ' ')}: the saved one couldn't be found again, so type it in again"]
     return []
+
+
+def entry_problems(where: str, raw, modules: dict[str, Module]) -> list[str]:
+    """What a save would say is wrong with one playlist entry, on its own (the editor's Preview on the panel
+    checks its draft with this before the panel shows it)."""
+    return _entry(where, raw, modules)
 
 
 def _times(raw) -> str | None:
@@ -300,12 +326,37 @@ def _adopt_location(config: dict, modules: dict[str, Module]) -> list[str]:
     return notes
 
 
-def tidy(config: dict, modules: dict[str, Module]) -> list[str]:
+def scrub_secrets(path: Path, modules: dict[str, Module]) -> None:
+    """Take every module's own secret (``Module.secrets``) out of the saved config at ``path``, and out of the copy
+    kept from before the last save, there and then: ``tidy`` has already moved it to where those are kept
+    (bongo/private.py). Each file is written whole or not at all; one that can't be read is left alone."""
+    for file in (Path(path), backup_path(path)):
+        data = _read(file)
+        if data is None:
+            continue
+        found = False
+        for key in ("playlist", "overlays"):
+            for entry in _listed(data, key):
+                module = modules.get(entry.get("module")) if isinstance(entry, dict) else None
+                settings = entry.get("settings") if module and isinstance(entry.get("settings"), dict) else {}
+                for name in [n for n in settings if n in module.secrets] if module else []:
+                    del settings[name]
+                    found = True
+        if found:
+            try:
+                _write(file, json.dumps(data, indent=2))
+            except OSError as error:
+                log.warning("couldn't take a secret out of %s: %s", file.name, error)
+
+
+def tidy(config: dict, modules: dict[str, Module], path: Path | None = None) -> list[str]:
     """Quietly update a config saved by an older Bongo: drop settings a module no longer has and
     choices it no longer offers (a renamed palette, say), so they fall back to the defaults instead
-    of stopping that entry from playing and every dashboard save. Changes ``config`` in place and
+    of stopping that entry from playing and every dashboard save. ``path``: the file ``config`` was read from; a
+    module's own secret found in it is moved out of it, on disk too, at once (``scrub_secrets``). Changes ``config`` in place and
     returns what it changed, for the log."""
     notes = []
+    secret_moved = False
     splash = config.get("splash")
     if isinstance(splash, dict) and "boot" not in splash:
         # Before 11 Nov 2026 the splash played only at start-up. It is a playlist item now (as in
@@ -356,7 +407,19 @@ def tidy(config: dict, modules: dict[str, Module]) -> list[str]:
                 value, offered = settings[name], choices.get(name)
                 if isinstance(offered, str):  # "media", "palettes": checked by their own rules
                     offered = None
-                if name not in known:
+                if name in module.secrets and name in known:
+                    # a shared secret that an older build (or an older version of the module) kept with the screen:
+                    # it moves to where those are kept, unless one is saved there already, and leaves the config
+                    from bongo import private
+                    try:
+                        if not private.saved(module.id, name):
+                            private.keep(module.id, name, value)
+                    except (ValueError, OSError):
+                        pass   # nothing worth keeping, or nowhere to keep it: it still leaves the config
+                    del settings[name]
+                    secret_moved = True
+                    notes.append(f"{key}[{i}] {entry['module']}: {name} is a secret now, kept apart from the config")
+                elif name not in known:
                     del settings[name]
                     notes.append(f"{key}[{i}] {entry['module']}: dropped old setting {name!r}")
                 elif name in limits and isinstance(value, (int, float)) and not isinstance(value, bool) \
@@ -380,6 +443,8 @@ def tidy(config: dict, modules: dict[str, Module]) -> list[str]:
                 elif offered is not None and isinstance(value, str) and value not in offered:
                     del settings[name]
                     notes.append(f"{key}[{i}] {entry['module']}: {name}: {value!r} is gone, back to the default")
+    if secret_moved and path is not None:
+        scrub_secrets(path, modules)
     return notes
 
 
@@ -424,6 +489,9 @@ def validate(config: dict, modules: dict[str, Module]) -> list[str]:
         entries = []
     for i, raw in enumerate(entries):
         problems += _entry(f"playlist[{i}]", raw, modules)
+    if sum(isinstance(e, dict) and e.get("module") not in modules for e in entries) > MOST_PARKED:
+        problems.append(f"playlist: at most {MOST_PARKED} screens of modules this Matrix doesn't have: remove some, "
+                        "or import their modules first")
     layout = config.get("settings_layout")   # Settings > Rearrange: which card goes where (the dashboard fills in the rest)
     if layout is not None and not (isinstance(layout, dict) and set(layout) <= {"top", "left", "right", "full"} and all(
             isinstance(v, list) and len(v) <= 40 and all(isinstance(x, str) and len(x) <= 40 for x in v) for v in layout.values())):
@@ -445,7 +513,7 @@ def validate(config: dict, modules: dict[str, Module]) -> list[str]:
                              for e in entries):
         problems.append("playlist: every screen that's on belongs to a module that's switched off; switch one back on "
                         "in Settings > Modules, or turn on another screen")
-    elif not entries and len(off) and not any(m not in off for m in list(modules)):
+    elif not entries and len(off) and not any(m not in off and module.styles for m, module in list(modules.items())):
         problems.append("modules_off: leave at least one module on")
     if config.get("splash"):
         problems += screen_problems("splash", config["splash"])
@@ -475,6 +543,9 @@ def validate(config: dict, modules: dict[str, Module]) -> list[str]:
             module.settings_for(raw.get("overlay"), raw.get("settings", {}), overlay=True)
         except ValueError as error:
             problems.append(f"{where}: {error}")
+        from bongo import standins
+        if any(isinstance(v, str) and standins.STAND_IN.fullmatch(v) for v in raw.get("settings", {}).values()):
+            problems.append(f"{where}: a saved secret couldn't be found again, so type it in again")
     sleep = config.get("sleep")
     if sleep:
         problems += screen_problems("sleep", sleep, sleep=True)
