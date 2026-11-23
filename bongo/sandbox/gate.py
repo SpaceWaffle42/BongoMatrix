@@ -116,19 +116,42 @@ def home_reason(address: str, own=own_address) -> str | None:
     return None
 
 
-def home_target(host: str, port: int, pinned: str | None = None, own=own_address) -> tuple[str | None, str]:
-    """The address to dial for a module's home-network address: (address, "") or (None, why not). A name is
-    looked up here, once, and the address that passed is the one dialled, so it can't change in between. Of the
-    addresses a name looks up to, only home-network ones count; ``pinned`` (the one used last time) is kept
-    while the name still gives it."""
-    try:
-        found = list(dict.fromkeys(i[4][0] for i in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)))
-    except (OSError, UnicodeError):
-        return None, f"couldn't find {host} on the network"
+def look_up(host: str, port: int, wait: float = HOME_TIMEOUT) -> list[str] | None:
+    """Every address ``host`` looks up to, in the order the system gives them; None if it can't be found within
+    ``wait`` seconds (a name server that doesn't answer mustn't hold the module up past its own timeout)."""
+    found: list = []
+
+    def ask():
+        try:
+            found.append([i[4][0] for i in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)])
+        except Exception:   # (any failure to look it up is "can't be found", never an error out of this thread)
+            found.append(None)
+    asking = threading.Thread(target=ask, daemon=True, name="home-lookup")
+    asking.start()
+    asking.join(wait)
+    return list(dict.fromkeys(found[0])) if found and found[0] else None
+
+
+def home_targets(host: str, port: int, pinned: str | None = None, own=own_address,
+                 wait: float = HOME_TIMEOUT) -> tuple[list[str], str]:
+    """The addresses to dial, in turn, for a module's home-network address: ([addresses], "") or ([], why not).
+    A name is looked up here, once, and only the addresses that passed are dialled, so it can't change in
+    between. Of the addresses a name looks up to, only home-network ones count (a name often has an IPv6 and an
+    IPv4 address, and a device may listen on only one of them: each is tried); ``pinned`` (the one that worked
+    last time) goes first while the name still gives it."""
+    found = look_up(host, port, wait)
+    if found is None:
+        return [], f"couldn't find {host} on the network"
     good = [a for a in found if home_reason(a, own) is None]
     if not good:
-        return None, f"{host} {home_reason(found[0], own) if found else 'has no address'}"
-    return (pinned if pinned in good else good[0]), ""
+        return [], f"{host} {home_reason(found[0], own) if found else 'has no address'}"
+    return ([pinned] + [a for a in good if a != pinned] if pinned in good else good), ""
+
+
+def home_target(host: str, port: int, pinned: str | None = None, own=own_address) -> tuple[str | None, str]:
+    """The first of ``home_targets``: (address, "") or (None, why not)."""
+    addresses, why = home_targets(host, port, pinned, own)
+    return (addresses[0] if addresses else None), why
 
 
 def connect(host: str, port: int, *, check_public=True) -> socket.socket:
@@ -430,26 +453,30 @@ class Gate:
             return self._refuse(client, HOME_FAILS["not_allowed"], "no home-network address is set in its settings")
         if busy:
             return self._refuse(client, HOME_FAILS["too_many"], "too many connections to its home-network address: try again in a minute")
+        started = time.monotonic()                       # one ``wait`` for the lookup and every address together
         if self.check_home:
-            address, why = home_target(host, port, pinned)
+            addresses, why = home_targets(host, port, pinned, wait=wait)
         else:                                            # (the tests' own server, on this computer)
-            try:
-                found = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-                found.sort(key=lambda a: a[0] != socket.AF_INET)   # IPv4 first: the tests' server listens there, wherever localhost points
-                address, why = found[0][4][0], ""
-            except OSError:
-                address, why = None, f"couldn't find {host} on the network"
-        if address is None:
+            found = look_up(host, port, wait)
+            addresses, why = (found, "") if found else ([], f"couldn't find {host} on the network")
+        if not addresses:
             with self.lock:
                 new, home["said"] = home["said"] != why, why
             if new:
                 log.warning("module %s wasn't let through to its home-network address: %s", module_id, why)
             return self._refuse(client, HOME_FAILS["not_found" if why.startswith("couldn't find") else "not_allowed"], why)
-        if address != pinned:
-            log.info("module %s: its home-network address %s is %s%s", module_id, host, address, f" (was {pinned})" if pinned else "")
-        try:
-            out = socket.create_connection((address, port), timeout=wait)   # the address that was checked, nothing looked up again
-        except OSError as error:
+        out = error = None
+        for address in addresses:                        # the addresses that were checked, nothing looked up again
+            left = wait - (time.monotonic() - started)
+            if left <= 0:
+                error = error or TimeoutError()
+                break
+            try:
+                out = socket.create_connection((address, port), timeout=left)
+                break
+            except OSError as failed:
+                error = failed
+        if out is None:
             if isinstance(error, TimeoutError) or error.errno == errno.ETIMEDOUT:
                 kind, why = "no_answer", f"{host} didn't answer on port {port}"
             elif error.errno == errno.ECONNREFUSED:
@@ -459,8 +486,10 @@ class Gate:
             else:
                 kind, why = "no_answer", f"couldn't reach {host}: {error.strerror or error}"
             with self.lock:
-                home["pin"], home["said"] = address, why
+                home["said"] = why
             return self._refuse(client, HOME_FAILS[kind], why)
+        if address != pinned:
+            log.info("module %s: its home-network address %s is %s%s", module_id, host, address, f" (was {pinned})" if pinned else "")
         with out:
             with self.lock:
                 current = self.homes.get(module_id) is home          # (not changed in Settings while it was connecting)

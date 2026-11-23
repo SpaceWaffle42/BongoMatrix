@@ -1,10 +1,15 @@
-"""Modules imported from a public GitHub link or a .zip (Settings > Modules > Import).
+"""Modules imported from a GitHub link, another link (a GitLab project, a .zip: bongo/linkfetch.py) or a .zip
+upload (Settings > Modules > Import).
 
 A shared module is a folder built exactly like one in bongo/modules/ (docs/MODULES.md), plus a
 ``bongo-module.json`` at the top:
 
     {"id": "tube_departures", "name": "London Tube departures", "version": "1.2.0", "author": "sam-k",
      "description": "...", "network": ["api.tfl.gov.uk"], "homepage": "https://github.com/sam-k/..."}
+
+A repository may hold several modules, each in a folder of its own (at the top, or one folder down): ``scan``
+finds them, the owner picks which (``choose``), and each is checked and tried on its own; each installed one
+remembers its folder (``source.folder``), so its updates come from there.
 
 Importing: fetch it (``fetch_github`` / a .zip), check the folder and the manifest (``unpack``), run every
 style on a test screen in its child process (``try_out``) and show what it looks like. Nothing is kept until
@@ -39,6 +44,7 @@ MANIFEST = "bongo-module.json"
 MOST_DOWNLOAD = 5 << 20          # a .zip or GitHub download
 MOST_UNPACKED = 20 << 20
 MOST_FILES = 500
+MOST_LISTED = 5000               # entries in a whole repository's archive (each module in it still MOST_FILES)
 FIRST_UID = 61000                # each imported module runs as a user of its own: 61000 + n
 ID = re.compile(r"[a-z][a-z0-9_]{1,31}")
 SITE = re.compile(r"(\*\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*\.[a-z][a-z0-9-]*[a-z0-9](:\d{1,5})?")
@@ -61,6 +67,10 @@ TRY_WAIT = 60.0                  # s for the whole test screen
 
 class ImportProblem(Exception):
     """Something the owner is told, as it is."""
+
+
+class Busy(ImportProblem):
+    """Another import is at work (one at a time)."""
 
 
 # -- the store ---------------------------------------------------------------------------------------------
@@ -163,7 +173,7 @@ def is_imported(module) -> bool:
 def public(module_id: str, info: dict, blocked: list[str] | None = None) -> dict:
     """What the dashboard shows of an imported module."""
     from bongo import abilities
-    keys = ("name", "version", "author", "description", "homepage", "source", "sites", "installed", "update")
+    keys = ("name", "version", "author", "description", "homepage", "source", "sites", "installed", "update", "sign_in")
     asked = info.get("abilities") or {}
     return {"id": module_id, **{k: info.get(k) for k in keys}, "only_listed": info.get("only_listed", True),
             "blocked": blocked or [],
@@ -215,14 +225,89 @@ def check_manifest(data, builtin_ids=()) -> dict:
     return out
 
 
-def unpack(archive: Path, dest: Path, builtin_ids=()) -> dict:
-    """Unpack a module's .zip into ``dest`` (its top folder, if it has one, dropped) and check it."""
+def _open(archive: Path) -> zipfile.ZipFile:
     try:
-        zf = zipfile.ZipFile(archive)
+        return zipfile.ZipFile(archive)
     except (zipfile.BadZipFile, OSError):
         raise ImportProblem("that isn't a .zip file") from None
+
+
+def _top(names: list[str]) -> str:
+    """The one folder everything in an archive sits in ("bongo_imports-main/"), dropped; "" if there isn't one, or
+    the module is at the very top."""
+    if MANIFEST in names:
+        return ""
+    tops = {n.split("/", 1)[0] for n in names}
+    return next(iter(tops)) + "/" if len(tops) == 1 and all("/" in n for n in names) else ""
+
+
+def _safe_part(part: str) -> bool:
+    return bool(part) and part not in (".", "..") and not any(c in part for c in "\\:\0") and part.isprintable()
+
+
+def scan(archive: Path, builtin_ids=()) -> list[dict]:
+    """Every module in an archive: [{"folder": "" (the archive is one module) or "sports", "manifest" or
+    "problem"}]. A folder counts if it holds both a bongo-module.json and an __init__.py: the top of the archive
+    itself, or one folder down (bongo_imports/sports/), never deeper (so a module's own folders are never other
+    modules). Nothing is unpacked here, and only plain files count."""
+    with _open(archive) as zf:
+        infos = zf.infolist()
+        if len(infos) > MOST_LISTED:
+            raise ImportProblem(f"it has more than {MOST_LISTED} files")
+        plain = {e.filename: e for e in infos if not e.is_dir() and stat.S_IFMT(e.external_attr >> 16) in (0, stat.S_IFREG)}
+        top = _top([e.filename for e in infos if not e.is_dir()])
+        found = []
+        for name in sorted(plain):
+            if not name.startswith(top) or not (name == top + MANIFEST or name.endswith("/" + MANIFEST)):
+                continue
+            parts = name[len(top):].split("/")[:-1]
+            if len(parts) > 1 or not all(_safe_part(p) for p in parts):
+                continue
+            folder = "/".join(parts)
+            if f"{top}{folder + '/' if folder else ''}__init__.py" not in plain:
+                continue
+            entry = {"folder": folder}
+            try:
+                with zf.open(plain[name]) as f:
+                    text = f.read((64 << 10) + 1)
+                if len(text) > 64 << 10:
+                    raise ImportProblem(f"its {MANIFEST} is too big")
+                entry["manifest"] = check_manifest(json.loads(text), builtin_ids)
+            except ImportProblem as error:
+                entry["problem"] = str(error)
+            except (ValueError, UnicodeDecodeError):
+                entry["problem"] = f"its {MANIFEST} isn't valid JSON"
+            except (OSError, EOFError, zipfile.BadZipFile, zlib.error):
+                entry["problem"] = f"its {MANIFEST} couldn't be read: the .zip may be damaged"
+            if folder == "":
+                return [entry]                         # the archive is one module, as before (its own folders aren't others)
+            found.append(entry)
+        ids = {}
+        for entry in found:                            # two folders claiming one id: neither can be told apart
+            if "manifest" in entry:
+                ids.setdefault(entry["manifest"]["id"], []).append(entry)
+        for same in ids.values():
+            if len(same) > 1:
+                for entry in same:
+                    entry.pop("manifest")
+                    entry["problem"] = f"another folder here has the same id ({', '.join(e['folder'] for e in same if e is not entry)})"
+        return found
+
+
+def unpack(archive: Path, dest: Path, builtin_ids=(), folder: str | None = None) -> dict:
+    """Unpack a module's .zip into ``dest`` (its top folder, if it has one, dropped) and check it. ``folder``: the
+    module is that folder of the archive (one of ``scan``'s), and nothing else in it is unpacked."""
+    zf = _open(archive)
     with zf:
         entries = [e for e in zf.infolist() if not e.is_dir()]
+        if folder:
+            top = _top([e.filename for e in entries])
+            if not all(_safe_part(p) for p in folder.split("/")):
+                raise ImportProblem("that folder can't be unpacked safely")
+            within = f"{top}{folder}/"
+            entries = [e for e in entries if e.filename.startswith(within)]
+            if f"{within}{MANIFEST}" not in {e.filename for e in entries}:
+                raise ImportProblem(f"there's no module in its folder ({folder}) any more")
         if len(entries) > MOST_FILES:
             raise ImportProblem(f"it has more than {MOST_FILES} files")
         if sum(e.file_size for e in entries) > MOST_UNPACKED:
@@ -233,7 +318,9 @@ def unpack(archive: Path, dest: Path, builtin_ids=()) -> dict:
                 raise ImportProblem(f"it has a file it can't unpack safely: {e.filename[:80]}")
         names = [e.filename for e in entries]
         top = ""
-        if MANIFEST not in names:
+        if folder:
+            top = within
+        elif MANIFEST not in names:
             tops = {n.split("/", 1)[0] for n in names}
             if len(tops) == 1 and f"{next(iter(tops))}/{MANIFEST}" in names:
                 top = next(iter(tops)) + "/"
@@ -447,13 +534,24 @@ class Job:
         self.running = True          # its thread is still at work (even if cancelled)
         self.cancelled = False
         self.made = time.monotonic()
+        self.choices = None          # a repository of several modules: what's in it, for the owner to pick from
+        self.archive = None
+        self.needs_token = False     # the project wants a sign-in: the dashboard offers the Access token box
+        self._secret = None          # that token (bongo/linkfetch.py): never in public(), never logged
+        self.waiting = 0.0           # when it reached the picker
 
     def public(self) -> dict:
         out = {"token": self.token, "step": self.step, "state": self.state, "message": self.message, "source": self.source}
+        if self.state == "failed" and self.needs_token:
+            out["needs_token"] = True
+        if self.origin and self.state in ("choose", "ready"):
+            out["origin"] = self.origin
+        if self.state == "choose":
+            out["choices"] = self.choices
         if self.state == "ready":
             from bongo.sandbox.jail import can_shut_in
             from bongo import abilities
-            out.update(manifest=self.manifest, preview=self.preview, updating=self.updating, new_sites=self.new_sites,
+            out.update(manifest=self.manifest, preview=self.preview, updating=self.updating, new_sites=self.new_sites, folder=self.origin.get("folder"),
                        only_listed=self.only_listed, enforced=can_shut_in(),
                        styles=list(self.described["styles"]), origin=self.origin,
                        # what it asks for beyond drawing its screens, in plain words (the review lists them
@@ -471,46 +569,92 @@ def staging() -> Path:
     return path
 
 
+def fetch(url: str, secret: str | None = None) -> tuple[bytes, dict]:
+    """A GitHub link as before; any other link the careful way (bongo/linkfetch.py), its warnings in the origin."""
+    if GITHUB.match(url.strip()):
+        return fetch_github(url)
+    from bongo import linkfetch
+    link = linkfetch.parse(url)
+    said = linkfetch.describe(url)
+    warnings = said["warnings"] + ([said["token_warning"]] if secret and said.get("token_warning") else [])
+    data, origin = linkfetch.fetch_gitlab(link, secret) if link["kind"] == "gitlab" else linkfetch.fetch_zip(link)
+    return data, {**origin, "warnings": warnings}
+
+
+def _choice(entry: dict, state: dict) -> dict:
+    """One module of a repository, as the picker shows it."""
+    from bongo import abilities
+    out = {"folder": entry["folder"]}
+    if "problem" in entry:
+        return {**out, "problem": entry["problem"]}
+    m = entry["manifest"]
+    have = state["modules"].get(m["id"])
+    return {**out, "id": m["id"], "name": m["name"], "version": m["version"], "author": m["author"],
+            "description": m.get("description", ""), "sites": m["sites"], "abilities": abilities.words(m.get("abilities")),
+            "installed": have.get("version") if have else None,
+            "newer": bool(have) and _newer(m["version"], str(have.get("version", "")))}
+
+
+def _newer(new: str, old: str) -> bool:
+    from bongo.linkfetch import _newer as newer
+    return newer(new, old)
+
+
 def start(source: str, *, url: str | None = None, upload: Path | None = None, upload_name: str = "",
-          builtin_ids=(), update_of: str | None = None) -> Job:
-    """Fetch, check and try a module in the background; ``JOBS[token]`` says how it's going."""
+          builtin_ids=(), update_of: str | None = None, secret: str | None = None, folder: str | None = None) -> Job:
+    """Fetch, check and try a module in the background; ``JOBS[token]`` says how it's going. A repository of
+    several modules stops at "choose" (``choose`` carries on). ``folder``: an update's own folder."""
     for token, job in list(JOBS.items()):               # an hour later, an import nobody finished is dropped
         if time.monotonic() - job.made > 3600:
             drop(token)
     token = base64.urlsafe_b64encode(os.urandom(9)).decode()
     job = JOBS[token] = Job(token, source)
+    job._secret = secret
     work = staging() / token
     work.mkdir()
 
     def run():
         try:
+            archive = work / "download.zip"
             if url:
-                data, job.origin = fetch_github(url)
-                archive = work / "download.zip"
+                from bongo import linkfetch
+                try:
+                    data, job.origin = fetch(url, secret)
+                except linkfetch.NeedsSignIn:
+                    job.needs_token = True
+                    raise
                 archive.write_bytes(data)
             else:
-                archive = upload
+                shutil.move(str(upload), archive)
                 job.origin = {"kind": "zip", "name": upload_name[:80]}
             job.step = "check"
-            dest = work / "module"
-            job.manifest = unpack(archive, dest, builtin_ids)
-            job.dir = dest
-            state = load_state()
-            have = state["modules"].get(job.manifest["id"])
-            if update_of and job.manifest["id"] != update_of:
-                raise ImportProblem(f"that's a different module ({job.manifest['id']}), not an update of {update_of}")
-            if update_of and have and (have.get("source") or {}).get("ref_kind") == "branch":
-                job.origin["ref_kind"] = "branch"        # still following its branch, for the next update
-            job.updating = have is not None
-            job.only_listed = have.get("only_listed", True) if have else True
-            job.new_sites = sorted(set(job.manifest["sites"]) - set(have.get("sites", []))) if have else []
-            from bongo import abilities
-            job.new_abilities = abilities.added(job.manifest.get("abilities"), have.get("abilities")) if have else []
-            if job.cancelled:
+            found = scan(archive, builtin_ids)
+            folders = [e["folder"] for e in found]
+            if update_of:
+                pick = folder or ""
+                if pick not in folders:
+                    raise ImportProblem(f"its folder ({pick}) isn't in the repository any more" if pick
+                                        else "it isn't a Matrix module any more: there's no bongo-module.json at the top")
+            elif "" in folders:
+                pick = ""
+            elif _hint(url) in folders:
+                pick = _hint(url)
+            elif len(found) == 1:
+                pick = folders[0]
+            elif not found:
+                raise ImportProblem(f"it isn't a Matrix module: there's no {MANIFEST} (with an __init__.py) at the top, "
+                                    "or in a folder one down")
+            else:                                        # several: the owner picks (``choose``)
+                state = load_state()
+                job.choices = [_choice(e, state) for e in found]
+                job.archive = archive
+                job.waiting = time.monotonic()
+                job.state = "choose"
                 return
-            job.step = "try"
-            job.described, job.preview = try_out(dest, job.manifest, free_uid(state, trying=True))
-            job.step, job.state = "ready", "ready"
+            problem = next((e.get("problem") for e in found if e["folder"] == pick), None)
+            if problem:
+                raise ImportProblem(problem)
+            _prepare(job, archive, work, pick, builtin_ids, update_of)
         except ImportProblem as error:
             job.state, job.message = "failed", str(error)
         except Exception:  # noqa: BLE001 - shown as a plain failure; the details are in the log
@@ -527,9 +671,105 @@ def start(source: str, *, url: str | None = None, upload: Path | None = None, up
     return job
 
 
-def busy() -> bool:
-    """An import is still at work (one at a time: each tries a module out in a child process)."""
-    return any(job.running for job in JOBS.values()) or any(job.running for job in _cancelled)
+def _hint(url: str | None) -> str | None:
+    """The folder a link names (…/-/tree/main/sports), if it names one."""
+    if not url or GITHUB.match(url.strip()):
+        return None
+    from bongo import linkfetch
+    try:
+        return linkfetch.parse(url).get("folder")
+    except ImportProblem:
+        return None
+
+
+def _prepare(job: Job, archive: Path, work: Path, folder: str, builtin_ids, update_of: str | None) -> None:
+    """Unpack one module (``folder`` of the archive), check it against what's installed and try it out."""
+    job.step = "check"
+    if folder:
+        job.origin = {**job.origin, "folder": folder}
+    dest = work / "module"
+    job.manifest = unpack(archive, dest, builtin_ids, folder or None)
+    job.dir = dest
+    state = load_state()
+    have = state["modules"].get(job.manifest["id"])
+    if update_of and job.manifest["id"] != update_of:
+        raise ImportProblem(f"that's a different module ({job.manifest['id']}), not an update of {update_of}")
+    old = (have or {}).get("source") or {}
+    if update_of and have and old.get("kind") == "github" and old.get("ref_kind") == "branch":
+        job.origin["ref_kind"] = "branch"        # still following its branch, for the next update
+    if update_of and old.get("branch") and not job.origin.get("branch"):
+        job.origin["branch"] = old["branch"]
+    job.updating = have is not None
+    job.only_listed = have.get("only_listed", True) if have else True
+    job.new_sites = sorted(set(job.manifest["sites"]) - set(have.get("sites", []))) if have else []
+    from bongo import abilities
+    job.new_abilities = abilities.added(job.manifest.get("abilities"), have.get("abilities")) if have else []
+    if job.cancelled:
+        return
+    job.step = "try"
+    job.described, job.preview = try_out(dest, job.manifest, free_uid(state, trying=True))
+    job.step, job.state = "ready", "ready"
+
+
+def choose(token: str, folders, builtin_ids=()) -> list[Job]:
+    """The owner's pick from a repository of several modules: one job for each, checked and tried in turn (in the
+    order they're listed) while the first is being looked at. The repository's own job is done with."""
+    with _lock:
+        parent = JOBS.get(token)
+        if parent is None or parent.state != "choose" or parent.archive is None:
+            raise ImportProblem("that import has expired; start it again")
+        if busy(but=token):
+            raise Busy("Another module is being checked; wait for it to finish.")
+        good = [c["folder"] for c in parent.choices if "problem" not in c]
+        if not isinstance(folders, list) or not folders or not all(isinstance(f, str) for f in folders):
+            raise ImportProblem("tick at least one module")
+        if any(f not in good for f in folders):        # only ever a folder the scan found (never a path from a browser)
+            raise ImportProblem("that module can't be imported from here")
+        picked = [f for f in good if f in folders]
+        jobs = []
+        for folder in picked:
+            child_token = base64.urlsafe_b64encode(os.urandom(9)).decode()
+            child = JOBS[child_token] = Job(child_token, parent.source)
+            child.origin, child._secret, child.step = dict(parent.origin), parent._secret, "check"
+            (staging() / child_token).mkdir()
+            shutil.copyfile(parent.archive, staging() / child_token / "download.zip")
+            jobs.append((child, folder))
+        parent.state = "split"
+        drop(token)
+
+    def run():
+        for child, folder in jobs:
+            work = staging() / child.token
+            try:
+                if child.cancelled:
+                    continue
+                _prepare(child, work / "download.zip", work, folder, builtin_ids, None)
+            except ImportProblem as error:
+                child.state, child.message = "failed", str(error)
+            except Exception:  # noqa: BLE001 - one module failing never stops the others
+                log.exception("module import failed")
+                child.state, child.message = "failed", "something went wrong (see the Logs page)"
+            finally:
+                child.running = False
+                if child.cancelled:
+                    shutil.rmtree(work, ignore_errors=True)
+
+    threading.Thread(target=run, name="module-import", daemon=True).start()
+    return [child for child, _ in jobs]
+
+
+PICKER_WAIT = 900                # s a repository's job waiting at the picker counts as an import at work
+
+
+def busy(but: str | None = None) -> bool:
+    """An import is still at work (one at a time: each tries a module out in a child process): one being fetched,
+    checked or tried, the modules picked from a repository while any is still to try, and a repository waiting at
+    the picker (for a quarter of an hour at most: a page closed on it doesn't hold imports up for long). ``but``:
+    that repository's own job (picking from it is the import at work)."""
+    now = time.monotonic()
+    return (any(job.running or job.state == "choose" and job.token != but and now - job.waiting < PICKER_WAIT
+                for job in JOBS.values())
+            or any(job.running for job in _cancelled))
 
 
 _cancelled: list[Job] = []
@@ -589,6 +829,7 @@ def install(token: str, modules: dict) -> dict:
                     "uid": have.get("uid") or free_uid(state), "only_listed": have.get("only_listed", True)}
             info.pop("id")
             info.pop("update", None)
+            info.pop("sign_in", None)                  # (a token that works again)
             state["modules"][module_id] = info
             # its own settings: what was typed before is kept where this version still has the field. Before the
             # state is saved, so nothing of it runs with settings that aren't there yet
@@ -598,6 +839,9 @@ def install(token: str, modules: dict) -> dict:
                 abilities.STORE.forget(module_id)
             abilities.STORE.adopt(module_id, info.get("abilities") or {})
             save_state(state)
+            if job._secret and (job.origin or {}).get("kind") == "gitlab":
+                from bongo import linkfetch           # its project's access token, for its updates (bongo/private.py)
+                linkfetch.keep_token(job.origin, job._secret)
             apply_home(module_id, info)                # (a version that no longer asks for one loses it)
             module = remote.build(info["described"], spec_for(module_id, info))
             object.__setattr__(module, "_imported", True)
@@ -646,9 +890,15 @@ def remove(module_id: str, modules: dict) -> None:
 
     with _lock:                                      # all of it: never half-removed while it's installed again
         state = load_state()
-        if state["modules"].pop(module_id, None) is None:
+        gone = state["modules"].pop(module_id, None)
+        if gone is None:
             raise KeyError(module_id)
         save_state(state)
+        try:                                         # its project's access token, unless another module still uses it
+            from bongo import linkfetch
+            linkfetch.forget_token(gone.get("source") or {}, state["modules"])
+        except OSError:
+            pass
         background.drop(module_id)
         remote.stop(module_id)
         apply_home(module_id, None)
@@ -674,8 +924,11 @@ CHECK_EVERY = 24 * 3600
 
 
 def update_link(info: dict) -> str | None:
-    """Where an update of a module installed from GitHub comes from (None: it can't be updated from there)."""
+    """Where an update of a module installed from GitHub or GitLab comes from (None: it can't be updated from there)."""
     src = info.get("source") or {}
+    if src.get("kind") == "gitlab":
+        ref = (info.get("update") or {}).get("ref") or (src.get("ref") if src.get("ref_kind") in ("branch", "tag") else None)
+        return f"{src['url']}/-/tree/{ref}" if ref else None
     if src.get("kind") != "github":
         return None
     if src.get("ref_kind") == "release":
@@ -686,20 +939,36 @@ def update_link(info: dict) -> str | None:
 
 
 def check_updates() -> list[str]:
-    """Look once for a newer version of each module installed from GitHub: a newer release, or a new version
+    """Look once for a newer version of each module installed from GitHub or GitLab (bongo/linkfetch.py): a newer release, or a new version
     number on its branch. Nothing is installed; the dashboard offers Update. Returns the ids with one."""
-    found = {}
+    found, signed = {}, {}
     for module_id, info in installed().items():
         src = info.get("source") or {}
+        if src.get("kind") == "gitlab":
+            from bongo import linkfetch
+            try:
+                found[module_id] = linkfetch.gitlab_update(info)
+                signed[module_id] = False
+            except linkfetch.NeedsSignIn:             # its token is gone or no longer accepted: said on its row, and no
+                found[module_id], signed[module_id] = None, True   # stale "update available" is left behind
+                log.info("couldn't check %s for an update: its GitLab project wants a sign-in", module_id)
+            except (ImportProblem, FileNotFoundError, ValueError, KeyError, TypeError) as error:
+                log.info("couldn't check %s for an update: %s", module_id, error)
+            continue
         if src.get("kind") != "github" or "/" not in src.get("repo", ""):
             continue
+        inside = f"{src['folder']}/" if src.get("folder") else ""
         try:
             if src.get("ref_kind") == "release":
                 tag = json.loads(_get(f"https://api.github.com/repos/{src['repo']}/releases/latest", 1 << 20,
                                       "application/vnd.github+json"))["tag_name"]
                 found[module_id] = {"version": str(tag)[:20], "ref": tag} if tag != src.get("ref") else None
+                if found[module_id] and inside:        # one of several modules: only if its own version moved
+                    manifest = json.loads(_get(f"https://raw.githubusercontent.com/{src['repo']}/{tag}/{inside}{MANIFEST}", 64 << 10))
+                    version = str(manifest.get("version", ""))[:20]
+                    found[module_id] = {"version": version, "ref": tag} if version and version != info.get("version") else None
             elif src.get("ref_kind") == "branch":
-                manifest = json.loads(_get(f"https://raw.githubusercontent.com/{src['repo']}/{src['ref']}/{MANIFEST}", 64 << 10))
+                manifest = json.loads(_get(f"https://raw.githubusercontent.com/{src['repo']}/{src['ref']}/{inside}{MANIFEST}", 64 << 10))
                 version = str(manifest.get("version", ""))[:20]
                 found[module_id] = {"version": version, "ref": src["ref"]} if version and version != info.get("version") else None
         except (ImportProblem, FileNotFoundError, ValueError, KeyError, TypeError) as error:
@@ -709,6 +978,12 @@ def check_updates() -> list[str]:
         for module_id, update in found.items():
             if module_id in state["modules"]:
                 state["modules"][module_id]["update"] = update
+        for module_id, needs in signed.items():
+            if module_id in state["modules"]:
+                if needs:
+                    state["modules"][module_id]["sign_in"] = True
+                else:
+                    state["modules"][module_id].pop("sign_in", None)
         state["checked"] = dt.datetime.now().astimezone().isoformat(timespec="seconds")
         save_state(state)
     return [k for k, v in found.items() if v]

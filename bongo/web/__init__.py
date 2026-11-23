@@ -967,16 +967,61 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         if addons.busy():
             abort(409, "Another module is being checked; wait for it to finish.")
 
-    @app.post("/api/addons/check")
-    def addons_check():
-        """Fetch a module from a GitHub link, check it and try it on a test screen (the page polls the job)."""
-        url = str(body().get("url", "")).strip()
-        one_at_a_time()
+    def is_github(url):
+        import urllib.parse
+        return bool(addons.GITHUB.match(url)) or (urllib.parse.urlsplit(url).hostname or "").lower() in ("github.com", "www.github.com")
+
+    @app.post("/api/addons/source")
+    def addons_source():
+        """What a link is, before it's fetched: GitHub (as always), or another place with the warnings that are true
+        of it (bongo/linkfetch.py). Nothing is fetched yet."""
+        from bongo import linkfetch
+        url = str(body().get("url", "")).strip()[:500]
         try:
-            addons.parse_github(url)
+            if is_github(url):
+                addons.parse_github(url)
+                return jsonify(kind="github", warnings=[])
+            return jsonify(linkfetch.describe(url))
         except addons.ImportProblem as error:
             return jsonify(error=str(error)), 422
-        return jsonify(addons.start(url, url=url, builtin_ids=builtin_ids()).public()), 202
+
+    @app.post("/api/addons/check")
+    def addons_check():
+        """Fetch a module from a link, check it and try it on a test screen (the page polls the job). A link that
+        isn't GitHub needs the owner to have ticked its warnings (accept_source), and may bring a project's access
+        token, kept only in the job until a module from it is installed."""
+        from bongo import linkfetch, private, standins
+        data = body()
+        url = str(data.get("url", "")).strip()[:500]
+        one_at_a_time()
+        secret = None
+        try:
+            if is_github(url):
+                addons.parse_github(url)
+            else:
+                linkfetch.parse(url)
+                if data.get("accept_source") is not True:
+                    return jsonify(error="Tick that you understand the warning first."), 422
+                if data.get("access_token"):
+                    try:
+                        secret = linkfetch.clean_token(data["access_token"])
+                    except ValueError as error:
+                        return jsonify(error=str(error)), 422
+                    standins.hush([secret])   # (never in a log line from here on)
+        except addons.ImportProblem as error:
+            return jsonify(error=str(error)), 422
+        return jsonify(addons.start(url, url=url, builtin_ids=builtin_ids(), secret=secret).public()), 202
+
+    @app.post("/api/addons/check/<token>/choose")
+    def addons_choose(token):
+        """The modules picked from a repository of several: each is checked and tried in turn."""
+        try:
+            jobs = addons.choose(token, body().get("folders"), builtin_ids())
+        except addons.Busy as error:
+            return jsonify(error=str(error)), 409
+        except addons.ImportProblem as error:
+            return jsonify(error=str(error)), 422
+        return jsonify(jobs=[j.public() for j in jobs]), 202
 
     @app.post("/api/addons/upload")
     def addons_upload():
@@ -1000,9 +1045,20 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             abort(404, "no such module")
         url = addons.update_link(info)
         if url is None:
-            return jsonify(error="It wasn't installed from a GitHub release or branch: import the new version again."), 422
+            return jsonify(error="It wasn't installed from a release, tag or branch: import the new version again."), 422
+        from bongo import linkfetch, standins
+        src = info.get("source") or {}
+        secret = linkfetch.token_for(src)
+        sent = body().get("access_token")
+        if sent and src.get("kind") == "gitlab":   # a new token (the kept one was refused): kept once this update installs
+            try:
+                secret = linkfetch.clean_token(sent)
+            except ValueError as error:
+                return jsonify(error=str(error)), 422
+            standins.hush([secret])
         one_at_a_time()
-        return jsonify(addons.start(url, url=url, builtin_ids=builtin_ids(), update_of=module_id).public()), 202
+        return jsonify(addons.start(url, url=url, builtin_ids=builtin_ids(), update_of=module_id,
+                                    folder=src.get("folder"), secret=secret).public()), 202
 
     @app.post("/api/addons/updates")
     def addons_check_updates():

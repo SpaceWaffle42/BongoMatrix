@@ -1,11 +1,21 @@
-// Settings > Modules: importing a module someone else made (a public GitHub link or a .zip), and what each
-// imported module adds to its row: where it came from, the sites it can reach, and Remove (bongo/addons.py).
+// Settings > Modules: importing a module someone else made (a GitHub link, another link such as a GitLab project
+// or a .zip link, with warnings: bongo/linkfetch.py; or a .zip), picking from a repository of several modules, and
+// what each imported module adds to its row: where it came from, the sites it can reach, and Remove (bongo/addons.py).
 import { api, get, post } from './api.js';
 import { h, icon, toast, humanize } from './ui.js';
 import { S, onLeave, takeTheirs, dirtyCount, normalise } from './app.js';
 
 const STEPS = [['fetch', 'Fetching it'], ['check', 'Checking its files'], ['try', 'Trying each of its looks on a test screen']];
-const sourceText = (s) => (!s ? '' : s.kind === 'github' ? `github.com/${s.repo}${s.ref_kind === 'branch' ? ` (${s.ref})` : ''}` : s.name || 'a .zip');
+const inFolder = (s) => (s.folder ? `/${s.folder}` : '');
+const sourceText = (s) => (!s ? '' : s.kind === 'github' ? `github.com/${s.repo}${inFolder(s)}${s.ref_kind === 'branch' ? ` (${s.ref})` : ''}`
+  : s.kind === 'gitlab' ? `${String(s.url || '').replace(/^https?:\/\//, '')}${inFolder(s)}${['branch', 'tag'].includes(s.ref_kind) ? ` (${s.ref})` : ''}`
+    : s.kind === 'link' ? `${s.host}/${s.name}${inFolder(s)}` : `${s.name || 'a .zip'}${s.folder ? ` (${s.folder})` : ''}`);
+const isGitHub = (url) => /^https?:\/\/(www\.)?github\.com(\/|$)/i.test(url);
+/** Where a module comes from, with what's true of it (not GitHub, the home network, http): before a fetch and on the review. */
+function sourceWarning(label, warnings, id) {
+  return h('div', { class: 'error-box source-warn', id, role: 'note' }, h('strong', { style: 'display:block' }, label),
+    h('ul', { class: 'warn-list' }, warnings.map((w) => h('li', null, w.text))));
+}
 
 /** The Import panel: paste a link (or pick a .zip), wait while it's fetched and tried, look, trust, install.
  *  ``done(id)`` runs after an install. Returns { button, panel, update }. */
@@ -19,15 +29,27 @@ export function importBox(done) {
   const button = h('button', { type: 'button', class: 'btn primary', 'aria-expanded': 'false', 'aria-controls': 'import-panel' }, '+ Import module');
 
   const forgetJob = (j) => { if (j?.token) api('DELETE', `/api/addons/check/${j.token}`, {}).catch(() => {}); };
-  const stop = () => { clearTimeout(timer); timer = null; run += 1; forgetJob(job); job = null; };
+  let queue = null;   // several modules picked from one repository: { jobs, at, installed, missed } (each reviewed in turn)
+  const stop = () => {
+    clearTimeout(timer); timer = null; run += 1; forgetJob(job); job = null;
+    if (queue) { queue.jobs.slice(queue.at + 1).forEach(forgetJob); queue = null; }
+  };
   const close = () => {
     if (saving) return;                 // installing: it finishes (and says so) first
     stop(); panel.hidden = true; button.setAttribute('aria-expanded', 'false'); button.focus(); };
   cancel.onclick = close;
   panel.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') { ev.preventDefault(); close(); } });
   onLeave(stop);
+  // the tab closed or reloaded partway through: the import (and any modules still to review) is cancelled, so the
+  // Matrix frees their space now rather than in an hour (best effort: the page is going)
+  window.addEventListener('pagehide', () => {
+    const left = [job, ...(queue ? queue.jobs.slice(queue.at + 1) : [])].filter((j) => j?.token && !saving);
+    for (const j of left) fetch(`/api/addons/check/${j.token}`, { method: 'DELETE', keepalive: true, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => {});
+  });
 
-  function askLink(problem = '', value = '') {
+  // a link that isn't GitHub: what it is and its warnings (/api/addons/source), the tick, and an access token
+  let place = null;   // { url, said, token: '' } for the link in the box
+  function askLink(problem = '', value = '', needsToken = false) {
     title.textContent = 'Import a module';
     const url = h('input', { class: 'input mono', id: 'import-url', type: 'text', inputmode: 'url', placeholder: 'https://github.com/someone/their-module',
       spellcheck: 'false', autocomplete: 'off', autocapitalize: 'off', value });
@@ -36,28 +58,92 @@ export function importBox(done) {
     pick.onclick = () => file.click();
     file.onchange = () => { if (file.files[0]) begin(null, file.files[0]); };
     const check = h('button', { type: 'submit', class: 'btn primary' }, 'Check');
+    const warnBox = h('div', { class: 'stack-s', hidden: true });
     const link = () => { const v = url.value.trim(); return !v || /^https?:\/\//i.test(v) ? v : `https://${v}`; };
-    const form = h('form', { class: 'stack-s', onsubmit: (ev) => { ev.preventDefault(); if (link()) begin(link()); else url.focus(); } },
-      h('label', { class: 'field-label', for: 'import-url' }, 'GitHub link'),
+    let ok = null;      // the tick, while a warning is shown
+    let token = null;   // the access token box
+    const shown = () => place && place.url === link();
+    url.addEventListener('input', () => {   // another link: its warnings are looked at again
+      if (!shown()) { warnBox.hidden = true; ok = token = null; check.textContent = 'Check'; check.disabled = false; }
+    });
+    const warn = (info, openToken) => {
+      ok = h('input', { type: 'checkbox', class: 'check', id: 'import-source-ok', 'aria-describedby': 'import-source' });
+      token = info.token ? h('input', { class: 'input mono', id: 'import-token', type: 'password', autocomplete: 'off', spellcheck: 'false',
+        autocapitalize: 'off', placeholder: 'glpat-…', value: place.token || '' }) : null;
+      ok.onchange = () => { check.disabled = !ok.checked; };
+      check.textContent = 'Fetch'; check.disabled = true;
+      const said = sourceWarning(info.label, info.warnings, 'import-source');
+      // a token typed for an http link: one more warning in the same list, under the same tick (ticked again for it)
+      const tokenWarning = info.token_warning ? h('li', { id: 'import-token-warning' }, info.token_warning.text) : null;
+      const sayToken = () => {
+        if (!tokenWarning) return;
+        const typed = Boolean(token.value.trim());
+        if (typed && !tokenWarning.isConnected) {
+          said.querySelector('ul').append(tokenWarning);
+          if (ok.checked) { ok.checked = false; check.disabled = true; }
+        } else if (!typed && tokenWarning.isConnected) tokenWarning.remove();
+      };
+      if (token) token.addEventListener('input', sayToken);
+      warnBox.replaceChildren(said,
+        h('label', { class: 'row gap-s', for: 'import-source-ok', style: 'align-items:flex-start' }, ok,
+          h('span', { class: 'small' }, 'I understand. Fetch it from here.')),
+        token ? h('details', { class: 'item-more', open: openToken || place.token ? '' : null },
+          h('summary', null, 'Private project? Add an access token'),
+          h('div', { class: 'stack-s', style: 'margin-top:6px' },
+            h('label', { class: 'field-col', for: 'import-token' }, 'Access token (optional)', token),
+            h('p', { class: 'tiny muted flush' }, `A read-only project or personal token (read_api, or read_repository). It's used only to download from ${info.host} and check it for updates, sent only there (as GitLab's PRIVATE-TOKEN header), and kept on the Matrix: never shown again. Removing the last module from this project forgets it.`),
+            info.plain ? h('p', { class: 'tiny warn flush' }, 'This address isn\'t encrypted: a token typed here is added to the warnings above, and the tick covers it too.') : null)) : null);
+      sayToken();
+      warnBox.hidden = false;
+      if (openToken && token) token.focus(); else ok.focus();
+    };
+    const form = h('form', { class: 'stack-s', onsubmit: async (ev) => {
+      ev.preventDefault();
+      const v = link();
+      if (!v) { url.focus(); return; }
+      if (isGitHub(v)) { place = null; begin(v); return; }
+      if (shown() && ok) {                   // ticked: fetch, with the token if one was typed
+        if (!ok.checked) { ok.focus(); return; }
+        place.token = token ? token.value.trim() : '';
+        begin(v, null, null, { accept_source: true, ...(place.token ? { access_token: place.token } : {}) });
+        return;
+      }
+      check.disabled = true;
+      try {
+        const info = await post('/api/addons/source', { url: v });
+        if (info.kind === 'github') { place = null; begin(v); return; }
+        place = { url: v, said: info, token: '' };
+        warn(info, false);
+      } catch (e) { check.disabled = false; body.querySelector('.error-box[role="alert"]')?.remove(); form.after(h('p', { class: 'error-box', role: 'alert' }, said(e.message))); }
+    } },
+      h('label', { class: 'field-label', for: 'import-url' }, 'Link'),
       h('div', { class: 'row gap-s' }, url, check),
-      h('p', { class: 'tiny muted flush' }, 'A repo, a release or a branch link all work. Or ', pick, ' someone sent you.', file));
+      h('p', { class: 'tiny muted flush' }, 'A GitHub repo, release or branch: the usual place for modules. Other links (a GitLab project, your own too, or a link to a .zip) work at your own risk: you\'ll see what that means before anything is fetched. Or ', pick, ' someone sent you.', file),
+      warnBox);
     body.replaceChildren(form, ...(problem ? [h('p', { class: 'error-box', role: 'alert' }, problem)] : []));
-    url.focus();
+    if (place && place.url === link() && !isGitHub(link())) warn(place.said, needsToken);   // back after a failed fetch: the tick again
+    else url.focus();
   }
 
   const said = (message) => { const m = String(message || 'something went wrong').replace(/\.$/, ''); return m.charAt(0).toUpperCase() + m.slice(1) + '.'; };
 
-  async function begin(url, zip, updateOf) {
+  let updating = null;   // { id, name } while an update runs: a refused token asks for a new one here
+  async function begin(url, zip, updateOf, extra = {}) {
     stop();
+    if (!updateOf) updating = null;
     const mine = run;
     title.focus();                      // the form is going: keep focus (and Escape) in the panel
     progress(null, url || zip?.name || '');
     let started;
     try {
-      if (updateOf) started = await post(`/api/addons/${updateOf}/update`, {});
-      else if (url) started = await post('/api/addons/check', { url });
+      if (updateOf) started = await post(`/api/addons/${updateOf}/update`, extra);
+      else if (url) started = await post('/api/addons/check', { url, ...extra });
       else { const f = new FormData(); f.append('file', zip, zip.name); started = await api('POST', '/api/addons/upload', f); }
-    } catch (e) { if (mine === run) askLink(said(e.message), url || ''); return; }
+    } catch (e) {
+      if (mine !== run) return;
+      if (updating) askToken(said(e.message)); else askLink(said(e.message), url || '');
+      return;
+    }
     if (mine !== run) { forgetJob(started); return; }   // cancelled meanwhile
     job = started;
     poll(url, mine);
@@ -70,7 +156,14 @@ export function importBox(done) {
     if (mine !== run) return;
     job = now;
     if (job.state === 'working') { progress(job.step, job.source); timer = setTimeout(() => poll(url, mine), 600); return; }
-    if (job.state === 'failed') { const why = said(job.message); job = null; askLink(`Couldn't import that. ${why}`, url || ''); return; }
+    if (job.state === 'failed') {
+      const why = said(job.message), token = job.needs_token;
+      if (queue) { failedInQueue(why); return; }
+      job = null;
+      if (updating && token) { askToken(`Couldn't update it. ${why}`); return; }
+      askLink(`Couldn't import that. ${why}`, url || '', token); return;
+    }
+    if (job.state === 'choose') { choose(url, mine); return; }
     review();
   }
 
@@ -88,13 +181,99 @@ export function importBox(done) {
       h('span', { class: 'dot', 'aria-hidden': 'true' }), label, k < at ? h('span', { class: 'sr-only' }, ' (done)') : null)));
   }
 
+  /** A repository of several modules: the owner ticks which (none to start with), and each gets its own review. */
+  function choose(url, mine) {
+    const parent = job, choices = parent.choices || [];
+    const ticks = [];
+    const go = h('button', { type: 'submit', class: 'btn primary', value: 'go', disabled: true }, 'Review selected');
+    const count = h('span', { class: 'tiny muted', 'aria-live': 'polite' }, 'None ticked');
+    const changed = () => { const n = ticks.filter((t) => t.checked).length; go.disabled = !n; count.textContent = n ? `${n} ticked` : 'None ticked'; };
+    const rows = choices.map((c, k) => {
+      const id = `pick-${k}`;
+      if (c.problem) {
+        return h('li', { class: 'pick-row off' }, h('input', { type: 'checkbox', class: 'check', id, disabled: true }),
+          h('label', { class: 'stack-xs min0', for: id }, h('span', { class: 'strong mono small' }, c.folder),
+            h('span', { class: 'tiny warn' }, `Can't be imported: ${said(c.problem)}`)));
+      }
+      const tick = h('input', { type: 'checkbox', class: 'check', id, value: c.folder, onchange: changed });
+      ticks.push(tick);
+      const status = c.installed == null ? null : c.newer ? h('span', { class: 'tag amber' }, `Update: ${c.installed} to ${c.version}`)
+        : h('span', { class: 'tag' }, c.installed === c.version ? 'Installed' : `Installed: ${c.installed}`);
+      return h('li', { class: 'pick-row' }, tick,
+        h('label', { class: 'stack-xs min0', for: id },
+          h('span', { class: 'row gap-s wrap' }, h('span', { class: 'strong' }, c.name), status),
+          h('span', { class: 'tiny muted' }, `${c.version} · by ${c.author} · ${c.folder}/`),
+          c.description ? h('span', { class: 'small' }, c.description) : null,
+          h('span', { class: 'tiny muted' }, c.sites.length ? `Sites it can reach: ${c.sites.join(', ')}` : 'Reaches no sites'),
+          c.abilities.length ? h('span', { class: 'tiny' }, `It also asks to: ${c.abilities.map((a) => a.title.charAt(0).toLowerCase() + a.title.slice(1)).join('; ')}.`) : null));
+    });
+    const dlg = h('dialog', { class: 'dialog wide pick-dialog', 'aria-labelledby': 'pick-title' },
+      h('form', { method: 'dialog', class: 'stack' },
+        h('h2', { class: 'h2', id: 'pick-title' }, 'Choose modules to import'),
+        h('p', { class: 'muted small flush', style: 'overflow-wrap:anywhere' }, `${choices.length} modules in ${sourceText(parent.origin)}. Tick the ones you want: each gets its own review and test screen before anything is installed.`),
+        h('ul', { class: 'pick-list' }, rows),
+        h('div', { class: 'row between gap-s wrap' }, count,
+          h('div', { class: 'row gap-s' }, h('button', { type: 'button', class: 'btn ghost', onclick: () => dlg.close('') }, 'Cancel'), go))));
+    dlg.addEventListener('close', async () => {
+      const folders = ticks.filter((t) => t.checked).map((t) => t.value);
+      const yes = dlg.returnValue === 'go' && folders.length;
+      dlg.remove();
+      if (mine !== run) return;
+      if (!yes) { stop(); askLink('', url || ''); return; }
+      let res;
+      try { res = await post(`/api/addons/check/${parent.token}/choose`, { folders }); }
+      catch (e) { if (mine === run) { stop(); askLink(said(e.message), url || ''); } return; }
+      if (mine !== run) { res.jobs.forEach(forgetJob); return; }
+      job = null;
+      queue = { jobs: res.jobs, at: -1, installed: [], missed: [], url };
+      next();
+    });
+    document.body.append(dlg);
+    dlg.returnValue = '';
+    if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');
+    progress('check', parent.source);
+  }
+
+  /** The next of the modules picked from a repository, or the end of them. */
+  function next() {
+    const q = queue;
+    q.at += 1;
+    if (q.at >= q.jobs.length) {
+      queue = null; job = null; run += 1;
+      panel.hidden = true; button.setAttribute('aria-expanded', 'false');
+      const got = q.installed.map((i) => i.name), missed = q.missed;
+      toast(`${got.length ? `Installed: ${got.join(', ')}.` : 'Nothing was installed.'}${missed.length ? ` Not installed: ${missed.join(', ')}.` : ''}`, got.length ? 'success' : 'info', 8000);
+      if (q.installed.length) done(q.installed[q.installed.length - 1].id);
+      else button.focus();
+      return;
+    }
+    job = q.jobs[q.at];
+    title.textContent = `Module ${q.at + 1} of ${q.jobs.length}`;
+    title.focus();
+    progress(null, job.source);
+    poll(q.url, run);
+  }
+
+  const ofQueue = () => (queue ? ` (${queue.at + 1} of ${queue.jobs.length})` : '');
+  function failedInQueue(why) {
+    const name = job.manifest?.name || 'This module';
+    queue.missed.push(name);
+    job = null;
+    const last = queue.at + 1 >= queue.jobs.length;
+    const on = h('button', { type: 'button', class: 'btn primary', onclick: next }, last ? 'Done' : 'Next module');
+    title.textContent = `Couldn't import it${ofQueue()}`;
+    body.replaceChildren(h('p', { class: 'error-box', role: 'alert' }, `${name} wasn't installed. ${why}`),
+      h('p', { class: 'small muted flush' }, 'The other modules you picked are still on their way.'), h('div', { class: 'row end' }, on));
+    on.focus();
+  }
+
   function review() {
     const m = job.manifest, mine = run;
-    title.textContent = job.updating ? `Update ${m.name} to ${m.version}` : m.name;
+    title.textContent = (job.updating ? `Update ${m.name} to ${m.version}` : m.name) + ofQueue();
     const asks = job.abilities || [];   // what it asks for beyond drawing its screens (bongo/abilities.py), in plain words
     const home = asks.some((a) => a.key === 'home_address');
     const trust = h('input', { type: 'checkbox', class: 'check', id: 'import-trust',
-      'aria-describedby': [asks.length ? 'import-asks' : '', m.sites.length ? 'import-risk' : ''].filter(Boolean).join(' ') || null });
+      'aria-describedby': [asks.length ? 'import-asks' : '', m.sites.length ? 'import-risk' : '', job.origin?.warnings?.length ? 'import-from' : ''].filter(Boolean).join(' ') || null });
     const install = h('button', { type: 'button', class: 'btn primary', disabled: true }, job.updating ? 'Update' : 'Install');
     trust.onchange = () => { install.disabled = !trust.checked; };
     install.onclick = async () => {
@@ -104,14 +283,18 @@ export function importBox(done) {
         const screens = job.styles.length > 0;
         const res = await post('/api/addons/install', { token: job.token, trust: true, author: m.author, abilities: asks.map((a) => a.key) });
         if (mine !== run) return;
+        if (queue) { queue.installed.push({ id: res.installed, name: res.name }); job = null; saving = false; next(); return; }
         job = null; run += 1; panel.hidden = true; button.setAttribute('aria-expanded', 'false');
         toast(updating ? `${res.name} updated` : screens ? `${res.name} installed. It's in Add a module now.` : `${res.name} installed. Its settings are under Modules.`, 'success');
         done(res.installed);
       } catch (e) { toast(said(e.message), 'error', 8000); install.disabled = !trust.checked; }
       finally { saving = false; }
     };
-    const from = job.origin?.kind === 'github'
+    const from = ['github', 'gitlab'].includes(job.origin?.kind)
       ? h('a', { href: job.origin.url, target: '_blank', rel: 'noopener' }, sourceText(job.origin)) : sourceText(job.origin);
+    const warned = job.origin?.warnings?.length ? job.origin.warnings : null;   // not GitHub: said again by the tick
+    const skip = queue ? h('button', { type: 'button', class: 'btn ghost', onclick: () => { forgetJob(job); queue.missed.push(m.name); job = null; next(); } },
+      queue.at + 1 >= queue.jobs.length ? 'Skip this one' : 'Skip, next module') : null;
     const sites = m.sites.length ? h('ul', { class: 'site-list' }, m.sites.map((s) => h('li', { class: 'mono' }, s)))
       : h('span', null, 'None: it works without the internet');
     const apart = job.enforced === false
@@ -144,9 +327,10 @@ export function importBox(done) {
       h('div', { class: 'note' }, icon('info'), h('div', null, apart)),
       ...(m.sites.length ? [h('p', { class: 'small flush', id: 'import-risk' }, h('strong', null, 'Shared-service risk: '),
         "if a module lists a big service that many websites share, it may also reach those other websites. The Matrix can't tell them apart.")] : []),
+      warned ? sourceWarning(`From ${job.origin.url}${job.origin.folder ? ` (its ${job.origin.folder} folder)` : ''}`, warned, 'import-from') : null,
       h('label', { class: 'row gap-s', for: 'import-trust', style: 'align-items:flex-start' }, trust,
-        h('span', { class: 'small' }, `I trust ${m.author}${m.sites.length ? ' and accept the shared-service risk' : ''}. It's their code that will run${asks.length ? ', and it may do what is listed above' : ''}.`)),
-      h('div', { class: 'row end gap-s wrap' }, install));
+        h('span', { class: 'small' }, `I trust ${m.author}${warned ? ' and where it comes from' : ''}${m.sites.length ? ' and accept the shared-service risk' : ''}. It's their code that will run${asks.length ? ', and it may do what is listed above' : ''}.`)),
+      h('div', { class: 'row end gap-s wrap' }, skip, install));
     title.focus();
   }
 
@@ -156,10 +340,36 @@ export function importBox(done) {
     askLink();
   };
   /** Update an imported module: the same steps, from where it was installed. */
-  const update = (id, name) => {
+  /** An update from a private GitLab project whose kept token wasn't accepted: a new one, then the same update. */
+  function askToken(problem = '') {
+    const { id, name, source } = updating;
+    stop();
+    title.textContent = `Update ${name}`;
+    const token = h('input', { class: 'input mono', id: 'update-token', type: 'password', autocomplete: 'off', spellcheck: 'false', autocapitalize: 'off', placeholder: 'glpat-…' });
+    const go = h('button', { type: 'submit', class: 'btn primary' }, 'Try again');
+    const plain = /^http:/i.test(source?.url || '');
+    const form = h('form', { class: 'stack-s', onsubmit: (ev) => {
+      ev.preventDefault();
+      const v = token.value.trim();
+      if (!v) { token.focus(); return; }
+      begin(null, null, id, { access_token: v });
+      title.textContent = `Update ${name}`;
+    } },
+      problem ? h('p', { class: 'error-box', role: 'alert' }, problem) : null,
+      h('p', { class: 'small flush' }, `${name} comes from a private GitLab project${source?.host ? ` on ${source.host}` : ''}, and the access token kept for it wasn't accepted (it may have expired or been revoked). Make a new read-only token in GitLab (read_api, or read_repository) and paste it here.`),
+      h('label', { class: 'field-col', for: 'update-token' }, 'Access token', h('div', { class: 'row gap-s' }, token, go)),
+      h('p', { class: 'tiny muted flush' }, `It replaces the one kept for this project once the update installs. It's sent only to ${source?.host || 'that GitLab'} (as GitLab's PRIVATE-TOKEN header), never shown again.`),
+      plain ? h('p', { class: 'error-box' }, 'This address isn\'t encrypted: the access token is sent as plain text, and anyone on your network could read it.') : null);
+    body.replaceChildren(form);
+    token.focus();
+  }
+
+  const update = (id, name, opts = {}) => {
     if (saving) return;
     panel.hidden = false; button.setAttribute('aria-expanded', 'true');
     panel.scrollIntoView({ block: 'nearest' });
+    updating = { id, name, source: opts.source };
+    if (opts.token) { askToken(); return; }
     begin(null, null, id);
     title.textContent = `Update ${name}`;
   };
@@ -170,7 +380,7 @@ export function importBox(done) {
  *  ``changed(list)`` takes the new /api/addons answer. */
 export function importedMore(m, info, changed, onUpdate) {
   const uses = [...(S.config.playlist || []), ...(S.config.overlays || [])].filter((e) => e.module === m.id).length;
-  const meta = h('span', { class: 'muted tiny', style: 'overflow-wrap:anywhere' }, `${info.version} · by ${info.author}${info.source ? ` · from ${sourceText(info.source)}` : ''}`,
+  const meta = h('span', { class: 'muted tiny', style: 'overflow-wrap:anywhere' }, `${info.version} · by ${info.author}${info.source ? ` · from ${sourceText(info.source)}` : ''}${info.source?.private ? ' · with an access token' : ''}`,
     info.only_listed ? null : h('span', { class: 'tag amber' }, 'Any site'));
   const asks = info.abilities || [];   // what it was allowed at import, beyond drawing its screens
   const said = info.background ? h('span', { class: 'tiny row gap-s module-status', role: 'status', hidden: true }) : null;   // its background task's own words
@@ -229,9 +439,13 @@ export function importedMore(m, info, changed, onUpdate) {
         info.only_listed ? (asks.some((a) => a.key === 'home_address') ? 'On: it can reach nothing else, and of your home network only the one device named in its settings.'
           : 'On: it can reach nothing else, and never your home network.') : 'Off: it can reach any site, and your home network.'))) : null,
     ask, blocked, h('div', { class: 'row gap-s wrap' }, remove, confirmRemove)));
-  const upd = info.update ? h('button', { type: 'button', class: 'btn small-btn', style: 'align-self:flex-start', onclick: () => onUpdate(m.id, m.name) },
+  const upd = info.update ? h('button', { type: 'button', class: 'btn small-btn', style: 'align-self:flex-start', onclick: () => onUpdate(m.id, m.name, { source: info.source }) },
     `Update to ${info.update.version}`) : null;
-  return [meta, said, upd, box];
+  // its private GitLab project no longer accepts the token kept for it: updates can't be looked for until a new one
+  const signIn = info.sign_in ? h('div', { class: 'row gap-s wrap', style: 'align-items:center' },
+    h('span', { class: 'tiny warn' }, 'Needs sign-in: its GitLab project no longer accepts the access token kept for it, so updates can\'t be checked.'),
+    h('button', { type: 'button', class: 'btn small-btn', onclick: () => onUpdate(m.id, m.name, { token: true, source: info.source }) }, 'Add a new token')) : null;
+  return [meta, said, upd, signIn, box];
 }
 
 /** A module's status line on its row: the square dot (green: fine; amber: something to look at) and its own words. */

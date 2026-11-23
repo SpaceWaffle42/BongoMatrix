@@ -1,4 +1,4 @@
-"""Modules imported from GitHub or a .zip (Settings > Modules > Import) run here, never in the Matrix's own
+"""Modules imported from a link or a .zip (Settings > Modules > Import) run here, never in the Matrix's own
 process: each in a child process of its own, as a user of its own, that sees only what it needs (its own
 folder, a folder it may write to, Python and the fonts) and reaches the internet only through the gate
 (``gate.py``), which lets it through to the sites its ``bongo-module.json`` lists and nowhere else.

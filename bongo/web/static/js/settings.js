@@ -387,7 +387,7 @@ function modulesCard() {
     r.append(sw, h('div', { class: 'module-text' }, h('span', { class: 'strong' }, m.name, m.proposed ? h('span', { class: 'tag' }, 'Proposed') : null,
       m.imported ? h('span', { class: 'tag amber' }, 'Imported') : null),
     m.description ? h('span', { class: 'muted small' }, m.description) : null, status,
-    ...(m.imported && info ? importedMore(m, info, changed, (id, name) => importer.update(id, name)) : [])));
+    ...(m.imported && info ? importedMore(m, info, changed, (id, name, opts) => importer.update(id, name, opts)) : [])));
     return r;
   };
   const draw = () => {
