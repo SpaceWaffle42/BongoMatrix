@@ -3,8 +3,10 @@
 ## Our own pets, homes, places and rooms (ship in every build)
 
 The built-in animals are our own pixel art in the house style, drawn in the Matrix Animator:
-`cat` (Mochi, 14 coats), `bunny` (Clover), `dog` (Biscuit), `jackrussell` (Jack), `spaniel` (Cocker),
-`hamster` (Nibbles), `lizard` (Ziggy), `flamingo` (Flo), `monster` (Krax) and `rock` (Pebble). Each
+`cat` (Mochi, 14 coats), `bunny` (Clover), `dog` (Biscuit) and its breeds (each its own kind, shown under Dog:
+`jackrussell` (Jack), `spaniel` (Cocker), `dachshund` (Frankie), `corgi` (Duke), `frenchie` (Gus), `pug` (Pickle),
+`shepherd` (Rex), `cockapoo` (Teddy)), `hamster` (Nibbles), `lizard` (Ziggy), `flamingo` (Flo),
+`monster` (Krax) and `rock` (Pebble). Each
 `<kind>.json` holds its frames, coats ("shape.colour" ids: one drawing recoloured, or an extra drawing
 `<kind>-<coat>.webp.b64`), its outfit pieces (`<kind>-outfits.webp.b64`, each stamped at its own marker),
 its tuning and its own home (day, empty bowl, night base), all in `<kind>.webp.b64`. The eight places

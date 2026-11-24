@@ -6,7 +6,7 @@ animations; every step is recorded as a Shot, and a style plays the shots by the
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .art import H, W, Art
 
@@ -80,6 +80,7 @@ class Stage:
         return min(self.w + 8, max(x + 72, 72)) if side == 1 else max(-8, min(x - 72, self.w - 72))
 
 
+STANCE = (3, 5, 7)   # the side walk's frames she may stand still on (landed: feet down, not mid-hop or mid-pass)
 DEPTH_SMALL, DEPTH_ROWS = 0.65, 12   # depth scaling: 65% twelve rows behind the full-size front rows (row 17)
 HOUSE = Stage()
 
@@ -305,12 +306,28 @@ class Script:
             sx, sy, tx, ty = round(sx), round(sy), round(x), round(y)
             run, done, i = max(abs(tx - sx), abs(ty - sy)), 0, 0
             small = (self.stage.w, self.stage.h) == (W, H) and min(self.stage.scale(sy), self.stage.scale(ty)) < 1
+            behind = still = 0       # (shrunk) how far her whole steps are behind the scaled gait; steps without a move
+            first, wanted, locked = len(self.shots), 0.0, False   # her walk's shots; the ground the scaled gait covers
             while done < run:
                 i += 1
-                s = self.stage.scale(sy + (ty - sy) * done / run)   # further back, smaller steps (depth)
-                step = gait[i % len(gait)] * s
-                if (self.stage.w, self.stage.h) != (W, H) and step:   # a bigger room's camera follows whole pixels:
+                at = sy + (ty - sy) * done / run
+                s = self.stage.scale(at)                            # further back, smaller steps (depth)
+                want = step = gait[i % len(gait)] * s
+                if s < 1 and tag in ("walk_right", "walk_left") and abs(tx - sx) >= abs(ty - sy):
+                    # shrunk: whole steps that keep her planted foot where it was (no slide), the one nearest the
+                    # scaled gait plus what she's behind, so every kind covers its own ground at its depth's pace
+                    ok = self.art.strides(tag, i % len(anim), self.stage.rows(self.art.ref_height, at),
+                                          gait[i % len(gait)])
+                    step = min(ok, key=lambda d: (d == 0 < max(ok) and i % len(anim) not in STANCE,
+                                                  abs(d - want - behind), d))   # (on the spot only on a stance frame)
+                    behind += want - step
+                    locked = True
+                elif (self.stage.w, self.stage.h) != (W, H) and step:   # a bigger room's camera follows whole pixels:
                     step = max(1, round(step))                         # whole-pixel steps there
+                wanted += want
+                still = 0 if step else still + 1
+                if still >= len(anim):                                # a whole cycle without moving (art or a depth
+                    step, still = 1, 0                                #   that never steps): a pixel on, never stuck
                 done = min(run, done + step)
                 if run - done < 0.5:
                     done = run                                        # (never a last sliver of a step on its own)
@@ -322,8 +339,12 @@ class Script:
                     if self.cat == [tx, ty] and done < run and step:
                         done = run                                    # there (a bigger room's whole-pixel steps)
                 self.shot(tag, i % len(anim), anim[i % len(anim)].ms / speed)
+            if locked and wanted:   # her whole steps came out a little long or short: her legs take that much more
+                #   or less time, so every kind keeps its own pace scaled by depth
+                tempo = max(0.6, min(1.6, run / wanted))
+                self.shots[first:] = [replace(x, ms=x.ms * tempo) for x in self.shots[first:]]
             last = i % len(anim)
-            if tag in ("walk_right", "walk_left") and last in (2, 4, 6):   # never stop mid-hop or mid-pass:
+            if tag in ("walk_right", "walk_left") and last + 1 in STANCE:   # never stop mid-hop or mid-pass:
                 self.shot(tag, last + 1, anim[last + 1].ms / speed)         # land in place, then hand off
             self.cat = [x, y]
         else:

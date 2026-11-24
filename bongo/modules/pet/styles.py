@@ -162,7 +162,7 @@ class Camera:
     While it gets ahead of her she eases back on screen a pixel a step; between her steps it holds still."""
     LEAD = 8              # columns it looks ahead of her while she walks one way
     LEAD_MS = 300         # she has walked one way this long before it looks ahead
-    WALK_MS = 300         # she counts as walking for this long after a step (slow walks pause up to 300 ms)
+    WALK_MS = 400         # she counts as walking for this long after a step (slow walks at the back pause up to ~340 ms)
     TURN_PX = 2           # she has gone this far back the other way before it counts as turning round
     ZONE = 4              # columns she may drift either side of where it aims before it moves
     MARGIN = (3, 0)       # columns / rows kept between her and the edge (sideways: for her ball lean)

@@ -16,7 +16,7 @@ from functools import lru_cache
 
 from PIL import Image
 
-from bongo.pets import art_file
+from bongo.pets import ORDER, art_file
 
 W, H = 64, 32
 
@@ -59,12 +59,43 @@ class Art:
         if rows >= ref:
             return frame
         key = (id(frame), rows)
+        if key not in self.sized:   # (kept with its frame, so no other frame can come to have that id)
+            self.sized[key] = (frame, shrunk(frame, rows / ref))
+        return self.sized[key][1]
+
+    def strides(self, tag: str, i: int, rows: int, step: int) -> tuple:
+        """The steps (px, from slowest) she may take into frame ``i`` of a side walk drawn ``rows`` tall (``step``:
+        the gait's step at full size) without her planted foot leaving its screen columns. The shrink rounds each
+        foot column on its own, so the step scaled would make her feet slide a pixel to and fro on the small sizes.
+        With no foot planted any step from 1 px up to the gait's will do; the walk picks among them to keep its speed."""
+        ref = self.ref_height
+        if rows >= ref:
+            return (step,)
+        key = ("stride", tag, i, rows, step)
         if key not in self.sized:
-            self.sized[key] = shrunk(frame, rows / ref)
+            s, side = rows / ref, -1 if "left" in tag else 1
+
+            def feet(f):       # the columns (from her feet point) of her lowest row
+                return {f.dx + int(c) for c in np.nonzero(np.asarray(f.image.getchannel("A"))[-1 - f.dy])[0]}
+
+            def shown(cols):   # where those source columns end up once shrunk (shrunk()'s sampling)
+                ts = range(math.floor(min(cols) * s) - 2, math.ceil(max(cols) * s) + 3)
+                return {t for t in ts if round((t + 0.5) / s - 0.5) in cols}
+
+            was, now = feet(self.animations[tag][i - 1]), feet(self.animations[tag][i])
+            planted = {c for c in was if c - side * step in now}
+            ok = tuple(range(min(1, step), step + 1))   # (no foot down: a step, never on the spot)
+            if planted and step:
+                a, b = shown(planted), shown({c - side * step for c in planted})
+                held = {d: len(a & {t + side * d for t in b}) for d in range(-1, step + 2)}
+                # her foot stays put: it overlaps where it was, and no better a pixel either way
+                ok = tuple(d for d in range(step + 1) if held[d] and held[d] >= max(held[d - 1], held[d + 1])) or \
+                    (max(range(step + 1), key=lambda d: (held[d], -abs(d - step * s))),)
+            self.sized[key] = ok
         return self.sized[key]
 
 
-@lru_cache(maxsize=16)
+@lru_cache(maxsize=len(ORDER) + 16)   # every kind, with room to grow
 def _index(kind: str) -> dict:
     return json.loads(art_file(f"{kind}.json").read_text())
 
@@ -108,7 +139,7 @@ def sheet(kind: str = "cat", coat: str = "") -> Image.Image:
     return cats
 
 
-@lru_cache(maxsize=16)
+@lru_cache(maxsize=len(ORDER) + 16)   # every kind (and a few coats or outfits besides)
 def load(kind: str = "cat", coat: str = "", outfits: tuple = ()) -> Art:
     """The art for one pet (bongo/pets.py): ``<kind>.json``, the coat's atlas, and the outfits
     she's wearing (collar, Santa hat...: names from ``<kind>.json``; unknown ones are ignored)."""
@@ -148,9 +179,10 @@ def at_size(pic: Image.Image, rows: int, cache: dict) -> Image.Image:
     if rows >= pic.height:
         return pic
     key = ("toy", id(pic), rows)
-    if key not in cache:
-        cache[key] = pic.resize((max(1, round(pic.width * rows / pic.height)), max(1, rows)), Image.Resampling.NEAREST)
-    return cache[key]
+    if key not in cache:   # (kept with its picture, so no other picture can come to have that id)
+        cache[key] = (pic, pic.resize((max(1, round(pic.width * rows / pic.height)), max(1, rows)),
+                                      Image.Resampling.NEAREST))
+    return cache[key][1]
 
 
 def dressed(kind: str, frame: Frame, shift: int, pieces: list) -> Frame:

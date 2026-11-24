@@ -28,8 +28,10 @@ from pathlib import Path
 from bongo import paths
 
 BUILT_IN = Path(__file__).resolve().parents[1] / "resources" / "pet"
+# the dog's breeds, each its own kind (Settings > Pet shows them under Dog, after Biscuit)
+DOGS = ["jackrussell", "spaniel", "dachshund", "corgi", "frenchie", "pug", "shepherd", "cockapoo"]
 # the animals in the order Settings > Pet shows them
-ORDER = ["cat", "bunny", "dog", "jackrussell", "spaniel", "hamster", "lizard", "flamingo", "monster", "rock"]
+ORDER = ["cat", "bunny", "dog", *DOGS, "hamster", "lizard", "flamingo", "monster", "rock"]
 
 
 def art_file(name: str) -> Path:
@@ -54,7 +56,7 @@ class Pet:
     dress_up: bool = True  # seasonal outfits
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=len(ORDER) + 16)   # every kind, with room to grow
 def _index(kind: str) -> dict:
     try:
         return json.loads(art_file(f"{kind}.json").read_text())
@@ -98,7 +100,7 @@ def default_name(kind: str) -> str:
     return name if isinstance(name, str) and NAME.fullmatch(name) else Pet.name
 
 
-GROUPS = {"jackrussell": "dog", "spaniel": "dog"}               # the dog's other shapes: Settings shows them under Dog
+GROUPS = {k: "dog" for k in DOGS}                              # the dog's other shapes: Settings shows them under Dog
 
 
 def accessory(kind: str) -> str:
