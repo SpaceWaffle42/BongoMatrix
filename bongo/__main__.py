@@ -336,6 +336,8 @@ def main(argv=None) -> int:
     import threading
     live.panel_up = True
     live.beat()   # starting up doesn't count against it
+    from bongo import sdnotify
+    sdnotify.notify("READY=1")   # systemd (Type=notify) counts the display started once its panel is up
     from bongo.sandbox import background
     background.attach(live, modules, lambda: cfg.load(Path(args.config)))   # the controls an imported module may use
     background.sync(config)   # ...and the background tasks of the ones switched on (each in its own child process)

@@ -8,6 +8,13 @@ After=network.target
 [Service]
 # Root is needed for GPIO access by rgbmatrix.
 User=root
+# The display says READY=1 once its panel is up and WATCHDOG=1 every 5 s while its player is alive
+# (bongo/sdnotify.py, Live.watch): a process that hangs as a whole is restarted. A stuck player is
+# ended by the display itself after 180 s (Live.FROZEN_SECONDS). A Pi Zero takes a while to start.
+Type=notify
+NotifyAccess=main
+WatchdogSec=60
+TimeoutStartSec=180
 WorkingDirectory=/home/admin/matrix
 ExecStart=/home/admin/matrix/venv/bin/python -m bongo run
 Restart=on-failure

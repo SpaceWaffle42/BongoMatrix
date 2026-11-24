@@ -95,10 +95,16 @@ class Live:
                 # the player saying it's alive with nothing to show, so it can't tell a dark panel from a working one
                 "frames": self.shown, "frame_age": None if self.frame_at is None else round(time.monotonic() - self.frame_at, 1)}
 
-    def watch(self, stop: threading.Event, limit: float = FROZEN_SECONDS, every: float = 5.0, frozen=None) -> None:
+    def watch(self, stop: threading.Event, limit: float = FROZEN_SECONDS, every: float = 5.0, frozen=None,
+              notify=None) -> None:
         """The watchdog, on its own thread. A style that never returns freezes the panel while the
         dashboard carries on as if all were well, and saving a fix can't reach a stuck player. So
-        after ``limit`` seconds without a frame the process ends, and systemd starts it again."""
+        after ``limit`` seconds without a frame the process ends, and systemd starts it again.
+        While the player is alive it tells systemd so (``WATCHDOG=1``, bongo/sdnotify.py): if this whole
+        process hangs, this thread included, systemd restarts it (``WatchdogSec=`` in the unit)."""
+        if notify is None:
+            from bongo import sdnotify
+            notify = sdnotify.notify
         while not stop.wait(every):
             quiet = time.monotonic() - self.beat_at
             if quiet > limit:
@@ -108,6 +114,7 @@ class Live:
                     f"{on.module}/{on.style}" if on else "nothing", f"{after.module}/{after.style}" if after else "nothing")
                 (frozen or (lambda: os._exit(70)))()   # not sys.exit: the stuck thread would never let it finish
                 return
+            notify("WATCHDOG=1")
 
     def take_acts(self) -> list:
         """The buttons pressed for the module on the panel now, in order. Ones for any other module are dropped,
