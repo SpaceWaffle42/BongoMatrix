@@ -2,6 +2,7 @@
 import { get } from './api.js';
 import { h, icon, copyText, clockSec, clock, uptime, store } from './ui.js';
 import { S, bus, onLeave } from './app.js';
+import { lastStartBox } from './storage.js';
 
 const LEVELS = [['ERROR', 'Errors'], ['WARNING', 'Warnings'], ['INFO', 'Info'], ['DEBUG', 'Debug']];
 const MAX = 2000;
@@ -23,7 +24,11 @@ export function render(view) {
   const list = h('div', { class: 'log-list', role: 'log', 'aria-live': 'off' });
 
   view.append(
-    h('div', { class: 'page-head' }, h('h1', { class: 'h1' }, 'Logs')),
+    h('div', { class: 'page-head' }, h('div', { class: 'row between wrap gap-s' }, h('h1', { class: 'h1' }, 'Logs'),
+      h('a', { class: 'btn', href: '/api/logs/download', download: '' }, 'Download logs')),
+      h('p', { class: 'muted small flush' }, "Download logs saves one text file: this start's log, plus the warnings and errors kept on the card "
+        + 'from earlier starts. Send it to whoever looks after your Matrix. It never holds passwords, keys or calendar links.')),
+    ...[lastStartBox(S.state?.last_start)].filter(Boolean),
     h('section', { class: 'card log-summary', 'aria-label': 'Last hour at a glance' },
       h('div', { class: 'row gap-l wrap' },
         h('div', null, h('div', { class: 'small muted' }, 'Errors · 1h'), errN),

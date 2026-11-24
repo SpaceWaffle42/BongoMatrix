@@ -5,6 +5,7 @@ import { FrameLoop } from './led.js';
 import { helpButton, troubleNote, creditLine } from './help.js';
 import { S, bus, onLeave, go, href, moduleById, moduleOff, styleOf, entryName, draftChanged, dirtyCount, applyDraft, discardDraft, normalise, matrixClock, problemOf, problemLine } from './app.js';
 import { playsAt, nextStart, short, spoken, gapWarning, sleepTime, mins, hhmm } from './times.js';
+import { nearlyFull } from './storage.js';
 
 const COLOURS = { clock: '#FF7A3D', weather: '#5B9BE8', announcements: '#FFB547', calendar: '#E879B7',
   rss: '#8B95A5', text: '#A78BFA', astronomy: '#4ADE80', media: '#2DD4BF' };
@@ -124,6 +125,8 @@ export function render(view) {
     h('div', { class: 'row between' }, h('h2', { class: 'h2' }, 'Up next'), h('a', { href: href('/playlist'), 'data-route': '/playlist', class: 'small' }, 'Playlist')), upNext);
 
   const playlist = renderPlaylist();
+  const full = nearlyFull(S.state?.storage);   // (Settings > Device says it too; owners rarely open Settings)
+  if (full) view.append(h('div', { class: 'note trouble', role: 'status' }, icon('warn'), h('span', null, full)));
   view.append(h('div', { class: 'now-grid now-top' }, hero, h('div', { class: 'side-col' }, quick, pushForm, upCard)), playlist.el);
 
   // -- live updates ------------------------------------------------------------------------

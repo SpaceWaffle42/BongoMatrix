@@ -148,6 +148,16 @@ def _hardware(config):
         sys.exit(f"bongo: {error}")
 
 
+def notice_after_boot(live, wait: float = 300.0, sleep=time.sleep, clock=time.monotonic) -> None:
+    """Settings > Device, "Say when it comes back after losing power": "Back after a power cut" for 10 s, once the
+    boot screen has had its turn (it always plays first), or after ``wait`` seconds whatever is on."""
+    from bongo.player import Entry
+    start = clock()
+    while live.index is None and clock() - start < wait:
+        sleep(1)
+    live.push(Entry(module="text", style="static", seconds=10, settings={"text": "Back after a power cut"}))
+
+
 PLAYED = 50       # frames a config must show before a failure is no longer blamed on it (a few seconds)...
 PLAYED_FOR = 10.0  # ...or seconds it has been playing (a slow screen draws few frames)
 
@@ -226,7 +236,7 @@ def main(argv=None) -> int:
         import pathlib
 
         from bongo import events
-        events.start(pathlib.Path(args.config).parent)   # warnings kept on the card, and how the last run ended
+        started_how = events.start(pathlib.Path(args.config).parent)   # warnings kept on the card, and how the last run ended
     modules = discover()
     if args.command == "run":
         from bongo import addons
@@ -357,6 +367,8 @@ def main(argv=None) -> int:
              place=cfg.safe_area(config).place, schedule=schedule, live=live,
              overlays=Overlays.from_config(config, modules, factory))
 
+    if started_how == "power" and config.get("power_notice") is True:
+        threading.Thread(target=notice_after_boot, args=(live,), daemon=True, name="power-notice").start()
     try:
         keep_playing(config, Path(args.config), modules, live, play_config)
     except KeyboardInterrupt:

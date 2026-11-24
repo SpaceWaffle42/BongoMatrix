@@ -6,7 +6,11 @@ keeps the little that matters on the card:
 
 - warnings and errors (no more than ``MOST_PER_MINUTE`` a minute, so a fault that repeats can't wear the
   card), in two files of ``SIZE`` bytes at most (``events.log`` and ``events.log.1``);
-- one line at every start saying how the last run ended: cleanly, or not (``ended``).
+- one line at every start saying how the last run ended: cleanly, or not (``ended``);
+- the last ``HISTORY`` starts and how each came about (``data/starts.json``), for the dashboard's "Last start"
+  (``summary``: Settings > Device and Logs).
+
+``download`` puts it all in one text file for Logs > Download logs.
 
 How the last run ended: a marker (``data/running``) is written at start with this boot's id and removed on
 a clean exit (stopped, restarted, updated, Ctrl+C). Found at the next start, the last run didn't end
@@ -16,6 +20,7 @@ player); with another, the whole Pi went down without shutting down (a power cut
 from __future__ import annotations
 
 import atexit
+import datetime as dt
 import json
 import logging
 import logging.handlers
@@ -27,6 +32,7 @@ from bongo import durable
 
 SIZE = 100_000          # bytes per file; two files at most
 MOST_PER_MINUTE = 60    # records written a minute; the rest are counted, and the count is written later
+HISTORY = 60            # starts remembered in starts.json
 log = logging.getLogger("bongo.events")
 
 
@@ -57,7 +63,7 @@ WORDS = {
     "first": "started for the first time",
     "clean": "started (the last run ended cleanly)",
     "crash": "started again after the display stopped without shutting down (a crash, or a stuck screen ended by the watchdog)",
-    "power": "started after the Matrix lost power or was reset without shutting down",
+    "power": "started after being switched off without shutting down (the power went off, or it was unplugged)",
 }
 
 
@@ -107,6 +113,7 @@ def start(data: Path, boot: str | None = None, root: logging.Logger | None = Non
         (mine.warning if how in ("crash", "power") else mine.info)("Bongo Matrix %s", WORDS[how])
         durable.write_text(data / "running", json.dumps({"boot": boot, "pid": os.getpid()}))
         register(lambda: finish(data, mine))
+        record(data, how)
     except OSError as error:   # a read-only or full card: the display still starts
         logging.getLogger(__name__).warning("events log not started: %s", error)
     return how
@@ -120,3 +127,64 @@ def finish(data: Path, logger: logging.Logger = log) -> None:
         durable.sync_folder(Path(data))
     except OSError:
         pass
+
+
+def _history(data: Path) -> list:
+    try:
+        said = json.loads((Path(data) / "starts.json").read_text())
+    except (OSError, ValueError):
+        return []
+    return [s for s in said if isinstance(s, dict) and isinstance(s.get("at"), str) and s.get("how") in WORDS] \
+        if isinstance(said, list) else []
+
+
+def record(data: Path, how: str, now: dt.datetime | None = None) -> None:
+    """Note this start in starts.json (the last ``HISTORY``). Never raises."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    try:
+        kept = _history(data)[-(HISTORY - 1):] + [{"at": now.isoformat(timespec="seconds"), "how": how}]
+        durable.write_text(Path(data) / "starts.json", json.dumps(kept))
+    except OSError:
+        pass
+
+
+def summary(data: Path, now: dt.datetime | None = None, days: int = 7) -> dict:
+    """For the dashboard: this start ({"at", "how"}, or None), and how many of the starts in the last ``days`` days
+    came after being switched off without shutting down (``off``) or after the display stopped (``crash``)."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    starts, off, crash = _history(data), 0, 0
+    for s in starts:
+        try:
+            at = dt.datetime.fromisoformat(s["at"])
+        except ValueError:
+            continue
+        if at.tzinfo and now - at <= dt.timedelta(days=days):
+            off += s["how"] == "power"
+            crash += s["how"] == "crash"
+    return {"last": starts[-1] if starts else None, "off": off, "crash": crash, "days": days}
+
+
+def download(data: Path, records, name: str = "Bongo Matrix", now: dt.datetime | None = None) -> str:
+    """Logs > Download logs: one text file with what's kept on the card (earlier starts, power cuts and crashes
+    included) and this start's log from memory (``records``: the dashboard's Logs page records)."""
+    now = now or dt.datetime.now().astimezone()
+    out = [f"Bongo Matrix logs: {name}, {now.strftime('%Y-%m-%d %H:%M %Z').strip()}", ""]
+    info = summary(data, now.astimezone(dt.timezone.utc))
+    if info["last"]:
+        out.append(f"This start: {info['last']['at']}, {WORDS[info['last']['how']]}")
+    out += [f"Last {info['days']} days: switched off without shutting down {info['off']} times, "
+            f"the display stopped {info['crash']} times", "", "== Kept on the card (warnings and errors) =="]
+    kept = ""
+    for name_ in ("events.log.1", "events.log"):
+        try:
+            kept += (Path(data) / name_).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+    out.append(kept.rstrip() or "(nothing yet)")
+    out += ["", "== This start (everything since the display started) =="]
+    for r in records:
+        when = dt.datetime.fromtimestamp(r.get("t", 0)).strftime("%Y-%m-%d %H:%M:%S")
+        out.append(f"{when} {r.get('level', '')} {r.get('source', '')}: {r.get('message', '')}")
+        if r.get("trace"):
+            out.append(str(r["trace"]).rstrip())
+    return "\n".join(out) + "\n"

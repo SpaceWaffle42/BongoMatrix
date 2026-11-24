@@ -13,6 +13,7 @@ import { DEMO } from './api.js';
 import * as deeplink from './deeplink.js';
 import { brightnessBox } from './daylight.js';
 import { backupCard } from './backup.js';
+import { storageBox } from './storage.js';
 
 /** The cards, by a name that never changes (their order is saved on the Matrix: config ``settings_layout``). */
 const CARDS = [['safe_area', () => safeAreaCard()], ['device', () => deviceCard()], ['modules', () => modulesCard()],
@@ -275,6 +276,7 @@ function deviceCard() {
   const showHost = () => { host.textContent = `${hostOf(name.value)}.local`; };
   name.addEventListener('input', showHost); showHost();
   const hubPic = h('input', { type: 'checkbox', id: 'set-hub-pic', checked: c.web?.hub_picture !== false });
+  const notice = h('input', { type: 'checkbox', id: 'set-power-notice', checked: c.power_notice === true });
   // this Matrix's logo on the hub: the same blocks in one colour, so each Matrix is easy to tell apart
   const BADGES = ['blue', 'red', 'tan', 'pink', 'yellow', 'green'];
   const auto = BADGES.includes(net.auto_badge) ? net.auto_badge : null;
@@ -287,7 +289,7 @@ function deviceCard() {
     if (tz.value && zones.length && !zones.includes(tz.value)) { toast(`“${tz.value}” isn't a time zone this browser knows. Use a name like Europe/London.`, 'error'); tz.focus(); return; }
     const { brightness, daylight } = bright.value();
     saveConfig({ name: name.value.trim() || 'Bongo Matrix', timezone: tz.value.trim() || null, daylight,
-      panel: { ...c.panel, brightness }, web: { hub_picture: hubPic.checked, badge: badge.value || null } }, 'Device settings');
+      panel: { ...c.panel, brightness }, web: { hub_picture: hubPic.checked, badge: badge.value || null }, power_notice: notice.checked }, 'Device settings');
   };
   return h('section', { class: 'card stack', 'aria-label': 'Device' }, h('h2', { class: 'h2' }, 'Device'),
     h('label', { class: 'field-col', for: 'set-name' }, 'Display name', name, where),
@@ -299,6 +301,10 @@ function deviceCard() {
     h('label', { class: 'row gap-s', for: 'set-hub-pic' }, hubPic, h('span', null, 'Show what it\'s playing on the hub')),
     h('p', { class: 'muted tiny flush' }, 'The hub (matrix.local) shows a live picture of each Matrix to anyone on this Wi-Fi, including pushed messages. Its name and what\'s playing always show.'),
     h('label', { class: 'field-col', for: 'set-badge' }, "This Matrix's logo colour on the hub", h('span', { class: 'badge-pick' }, badge, badgeLook)),
+    storageBox(S.state?.storage, S.state?.last_start),
+    h('label', { class: 'row gap-s', for: 'set-power-notice' }, notice, h('span', null, 'Say when it comes back after losing power')),
+    h('p', { class: 'muted tiny flush' }, 'Shows "Back after a power cut" on the panel for 10 seconds when the Matrix starts again after losing power. '
+      + "Off by default: if it's switched off at the wall every night, you'd see it every morning. Logs notes it either way."),
     h('div', { class: 'row end' }, save),
     panelTimingBox(),
     restartBox());

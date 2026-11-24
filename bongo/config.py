@@ -45,6 +45,9 @@ DEFAULTS = {
     # Settings > Device > Follow daylight (bongo/daylight.py): the panel goes from after_dark to panel.brightness
     # with the sun at the Matrix's location; gradual 0 (Quick) to 100 (Gradual). Off: one daytime brightness, as before.
     "daylight": dict(daylight.DEFAULTS),
+    # Settings > Device: "Back after a power cut" on the panel for 10 s when the Matrix starts again after being
+    # switched off without shutting down. Off: a Matrix switched off at the wall nightly would say it every morning
+    "power_notice": False,
 }
 
 
@@ -163,7 +166,7 @@ def context_factory(config: dict):
 
 
 KEYS = {"name", "timezone", "location", "panel", "safe_area", "web", "playlist", "splash", "sleep", "overlays", "update", "pet",
-        "wifi_country", "modules_off", "calendar_colours", "settings_layout", "daylight"}
+        "wifi_country", "modules_off", "calendar_colours", "settings_layout", "daylight", "power_notice"}
 OVERLAY_KEYS = {"module", "overlay", "every", "seconds", "offset", "settings", "enabled"}
 # limit_refresh: Hz the panel's refresh is held to (0: as fast as it goes). A slower Pi under load refreshes
 # unevenly, which shows as flicker; a steady rate a little under its slowest is calmer (Settings > Device)
@@ -457,6 +460,8 @@ def validate(config: dict, modules: dict[str, Module]) -> list[str]:
     country = config.get("wifi_country")
     if country is not None and not (isinstance(country, str) and len(country) == 2 and country.isalpha() and country.isupper()):
         problems.append("wifi_country must be a two-letter country code such as GB")
+    if not isinstance(config.get("power_notice", False), bool):
+        problems.append("power_notice: true or false")
     problems += location_problems(config.get("location"))
     problems += daylight.problems(config.get("daylight"))
     name = config.get("name")

@@ -28,7 +28,7 @@ from flask import Flask, Response, abort, jsonify, request, send_file, send_from
 from werkzeug.exceptions import HTTPException
 
 from bongo import animator, config as cfg, logo, net, netname, pets, petpack, sprite_preview, update
-from bongo import addons, media, places, private, standins
+from bongo import addons, events, media, places, private, standins
 from bongo.fonts import Fonts, names as font_names, table as font_table
 from bongo.module import Context
 from bongo.player import Entry
@@ -268,8 +268,16 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
                        uptime=round(time.time() - started), name=config.get("name", "Bongo Matrix"),
                        build=build,   # the pages as they are now: a tab left open across an update sees it change
                        pet_kinds=pets.kinds(), network=network_info(config), trouble=troubles(),
+                       # the SD card's space and how this start came about (Settings > Device, Logs, Now)
+                       storage=card_space(), last_start=events.summary(Path(config_path).parent),
                        # {"sleep" | "brightness": a module's name}: the one in force now was set by that module
                        set_by=background.CONTROLS.set_by() if background.CONTROLS else {})
+
+    def card_space() -> dict | None:
+        try:
+            return media.storage()
+        except OSError:
+            return None
 
     def troubles() -> dict:
         """What stops a module's screens showing anything (Module.trouble), by module: the dashboard says it on them."""
@@ -1495,6 +1503,15 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     def get_logs():
         since = number(request.args.get("since", 0), 0, 1e12, "since")
         return jsonify([r for r in logs.records if r["t"] > since])
+
+    @app.get("/api/logs/download")
+    def download_logs():
+        """Logs > Download logs: one text file, what's kept on the card and this start's log (bongo/events.py)."""
+        name = load().get("name") or "Bongo Matrix"
+        text = events.download(Path(config_path).parent, list(logs.records), name=name)
+        slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "matrix"
+        return Response(text, mimetype="text/plain", headers={
+            "Content-Disposition": f'attachment; filename="{slug}-logs-{dt.date.today().isoformat()}.txt"'})
 
     # -- software updates (bongo/update.py): the dashboard only asks; a separate service installs --
     data_dir = Path(config_path).parent
