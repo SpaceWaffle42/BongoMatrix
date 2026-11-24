@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import bisect
-import math
 import hashlib
 
 from PIL import Image, ImageDraw
@@ -136,32 +135,138 @@ def window(width: int, height: int, feet=None, tall: int = 18, above: int = 1, r
 PLAY = {"playing", "toy", "ball", "mouse"}   # scenes and free-roaming actions where she plays with her ball or toy mouse
 
 
-def lead(shot, width: int, room_width: int = W) -> float:
-    """In a bigger room: how far the view looks ahead of her, towards her ball or toy mouse on the
-    floor, so what she is playing with is on screen too. It grows as the thing goes further from her,
-    up to a limit, and never shrinks back on its own, so the view doesn't drift towards it and back.
-    It fades for things off her floor or leaving the room, so nothing coming or going makes it jump."""
-    far, out = width / 8, 0.0                       # no further: when play stops, the view slides back that far
-    lit = 1.0
-    if shot.fade and "night" in (shot.fade[0], shot.room):   # her ball fades with the light
-        lit = 1 - shot.fade[1] if shot.room == "night" else shot.fade[1]
-    for thing, k in ((shot.ball, lit), (shot.toy and shot.toy[0] == "mouse" and shot.toy[1:3], 1.0)):
-        if not thing:
-            continue
-        x, y = thing[0], thing[1]
-        k *= max(0.0, 1 - abs(y - shot.cat[1]) / 16)                         # only what is on the floor beside her
-        k *= max(0.0, min(1.0, (x + 8) / 16, (room_width + 8 - x) / 16))     # and not what is leaving the room
-        d = x - shot.cat[0]
-        out += max(-far, min(far, d / 2)) * k        # half way to it, up to a limit: it only grows as it goes
-    return max(-far, min(far, out))
-
-
 def fit(scene: Image.Image, width: int, height: int, feet=None, tall: int = 18, above: int = 1) -> Image.Image:
     """The part of the room that ``window`` picks."""
     if (width, height) == scene.size:
         return scene
     x, y = window(width, height, feet, tall, above, scene.size)
     return scene.crop((x, y, x + width, y + height))
+
+
+class Camera:
+    """The view in a room bigger than the screen (Billy 24 Nov: "not so jittery", then "we need a mix of the two").
+    It frames her as the old camera did, near the middle with room ahead of her as she walks, but moves like the
+    steady one: it aims LEAD px ahead of her in the way she is walking and lets her drift ZONE px either side of
+    that before it moves; then it moves with her, step for step, so she holds still on screen and the room goes by.
+    Changes of aim (she sets off, turns round, stops) glide an even GLIDE px a frame; it never turns straight back
+    within TURN_MS; still for STILL_MS, it glides to put her in the middle. It never loses her: up to RUSH a frame
+    (more if asked less often, as the dashboard's preview is) to keep her on screen. Up and down it keeps
+    FLOOR rows of floor under her and room for her tallest pose. Her ball or toy mouse stays in view while she
+    plays if both fit. A gap over FRESH_MS, or the clock going back, starts it afresh with her in the middle.
+    While it gets ahead of her she eases back on screen a pixel a step; between her steps it holds still."""
+    LEAD = 8              # columns it looks ahead of her while she walks one way
+    LEAD_MS = 300         # she has walked one way this long before it looks ahead
+    WALK_MS = 300         # she counts as walking for this long after a step (slow walks pause up to 300 ms)
+    TURN_PX = 2           # she has gone this far back the other way before it counts as turning round
+    ZONE = 4              # columns she may drift either side of where it aims before it moves
+    MARGIN = (3, 0)       # columns / rows kept between her and the edge (sideways: for her ball lean)
+    FLOOR = 5             # rows of floor kept under her feet in a room taller than the screen
+    GLIDE = 2             # pixels a frame for a glide while she stands (frames are 50 ms at 20 fps)
+    CATCH = 1             # while she walks, it gets ahead of her only as she steps: her step and CATCH more
+    RUSH = (12, 6)        # the most it moves in one frame to keep all of her on screen
+    TURN_MS = 200         # it won't glide back the way it just came within this long
+    FRAME_MS = 50         # a frame on the panel (the Pet module draws at 20 fps)
+    FRESH_MS = 1000       # after a gap this long (or the clock going back) it starts afresh: her in the middle
+    BALL_REACH = 5        # columns either side of her ball or toy mouse kept on screen while she plays
+    STILL_MS = 600        # still this long, and the view glides to put her back in the middle
+
+    def __init__(self):
+        self.at = None        # (x, y): the view's top left
+        self.clock = None     # when it was last asked, in ms
+        self.turned = {}      # axis -> (which way, when) it last moved
+        self.feet = None      # where her feet were (middle, feet row)
+        self.still = None     # since when they have been there
+        self.stepped_at = None   # when she last stepped sideways
+        self.way = (0, None)  # which way she is walking (-1, 0, 1), and since when
+        self.back = 0         # how far she has gone back against that way (a turn once it reaches TURN_PX)
+
+    @staticmethod
+    def hold(at, lo, hi, size, limit, spare, head_first=False):
+        """Along one axis: the start nearest ``at`` that keeps lo..hi on screen with ``spare`` to spare. When
+        that won't fit: her head at the top edge (head_first), or her middle in the middle."""
+        if hi - lo + 1 <= size - 2 * spare:      # lo..hi are rows/columns she takes up, both ends included
+            at = min(at, lo - spare)
+            at = max(at, hi + spare - size + 1)
+        else:
+            at = lo if head_first else (lo + hi) // 2 - size // 2
+        return max(0, min(limit, at))
+
+    def view(self, clock, her, thing, size, room):
+        """Where the view starts now. ``her`` is (left, top, right, feet): her reach either side of her feet,
+        her tallest pose with a clear row over her ears, and her feet; ``thing`` is her ball or toy mouse to
+        keep in view while she plays, or None; ``size`` the screen and ``room`` the room."""
+        (w, h), (rw, rh) = size, room
+        left, top, right, feet = her
+        mid = (left + right) // 2
+        if self.at is not None and clock == self.clock:
+            return self.at                          # asked twice for the same moment (two previews): no move
+        limit = (max(0, rw - w), max(0, rh - h))
+        floor = feet + (self.FLOOR if rh > h else 1)
+        fresh = self.at is None or not 0 <= clock - self.clock <= self.FRESH_MS
+        missed = 1 if fresh else max(1, round((clock - self.clock) / self.FRAME_MS))   # frames since it was last asked
+        frames = min(2, missed)                     # a late frame's glide catches up one; a slow preview's keep-up all
+        if fresh:
+            self.at, self.turned = (mid - w // 2, floor - h + 1), {}   # her in the middle; refined below
+            self.feet, self.still, self.stepped_at, self.way, self.back = None, clock, None, (0, None), 0
+        stepped = 0 if self.feet is None else mid - self.feet[0]   # how far she moved sideways this frame
+        if stepped:
+            self.stepped_at = clock
+            if self.way[0] == 0 or stepped * self.way[0] > 0:  # on her way (or setting off)
+                self.back = 0
+                if self.way[0] == 0:
+                    self.way = (1 if stepped > 0 else -1, clock)
+            else:                                   # back against her way: a turn only after TURN_PX
+                self.back += abs(stepped)
+                if self.back >= self.TURN_PX:
+                    self.way, self.back = (1 if stepped > 0 else -1, clock), 0
+        if self.feet != (mid, feet):
+            self.feet, self.still = (mid, feet), clock
+        walking = self.stepped_at is not None and clock - self.stepped_at <= self.WALK_MS
+        between = walking and not stepped           # her feet are still between two strides
+        if not walking and self.way[0]:
+            self.way, self.back = (0, None), 0      # she stopped: no more looking ahead until she walks again
+        settled = not fresh and clock - self.still >= self.STILL_MS and thing is None
+        way, since = self.way
+        lead = way * self.LEAD if walking and since is not None and clock - since >= self.LEAD_MS else 0
+        aim = mid + lead - w // 2
+        self.clock = clock
+        at = list(self.at)
+        # sideways: within ZONE of the aim (none once she has settled), and her ball too if both fit
+        zone = 0 if settled else self.ZONE
+        goal_x = max(aim - zone, min(aim + zone, at[0]))
+        # she has stopped: it stays put until she settles (never pans out to finish its look ahead, then back)
+        if not walking and not settled:
+            goal_x = at[0]
+        if thing is not None:
+            lo, hi = min(left, thing[0] - self.BALL_REACH), max(right, thing[0] + self.BALL_REACH)
+            if hi - lo + 1 <= w - 2 * self.MARGIN[0]:
+                goal_x = self.hold(goal_x, lo, hi, w, limit[0], self.MARGIN[0])
+        goals = (max(0, min(limit[0], goal_x)), self.hold(at[1], top, floor, h, limit[1], 0, head_first=True))
+        if fresh:
+            self.at = goals
+            return self.at
+        for a, (size_a, near, far) in enumerate(((w, left, right), (h, top, feet + 1))):
+            d = goals[a] - at[a]
+            step_way = (d > 0) - (d < 0)
+            last = self.turned.get(a)
+            back = last and last[0] == -step_way and clock - last[1] < self.TURN_MS
+            if a == 0 and stepped:                  # she stepped: it goes with her and CATCH more, so she eases
+                go = d * stepped > 0 and not back      # back a pixel a step; never against her step
+                moved = at[a] + (step_way * min(abs(d), abs(stepped) + self.CATCH) if go else 0)
+            elif a == 0 and between:                # between her strides it holds (she'd drift back while still)
+                moved = at[a]
+            else:
+                step = 0 if back else (abs(d) if abs(d) <= self.GLIDE and not settled else min(abs(d), self.GLIDE * frames))
+                moved = at[a] + step_way * step
+            if far - near < size_a:                 # all of her (and a row of floor) stays on screen, whatever
+                keep = max(far - size_a + 1, min(near, moved))
+                moved = at[a] + max(-self.RUSH[a] * missed, min(self.RUSH[a] * missed, keep - at[a]))
+            moved = max(0, min(limit[a], moved))
+            if moved != at[a]:
+                self.turned[a] = ((moved > at[a]) - (moved < at[a]), clock)
+            at[a] = moved
+        self.at = (at[0], at[1])
+        return self.at
 
 
 def banner_rows(t, life):
@@ -195,6 +300,10 @@ class _Scene(Style):
             t += shot.ms
         self.total = t
         self.lives = lifetimes(self.timeline, self.starts, self.total)
+        self.camera, self.last_view = Camera(), None
+        frames = [f for a in self.art.animations.values() for f in a]   # her widest reach from her feet and her
+        self.reach = (max(max(-f.dx, f.dx + f.image.width) for f in frames),   # tallest pose: the view keeps room
+                      max(max(f.image.height, -f.dy) for f in frames))         # for them, so it doesn't follow her legs
 
     def modes(self):
         return list(self.MODE)
@@ -256,13 +365,28 @@ class _Scene(Style):
                 self.place.front(img, clock, shot.room == "night")
         draw = ImageDraw.Draw(img)
         w, h = min(self.ctx.width, img.width), min(self.ctx.height, img.height)
-        feet = self.focus(t, shot, w) if big else shot.cat   # what the view follows
+        feet = shot.cat
         # a banner pushes her down as it slides in, so her face stays under it
         above = 1 + max((banner_rows(t - began, ended - began) for item, began, ended in self.lives[k] if item[0] == "banner"), default=0)
         if any(item[0] == "zzz" for item, _, _ in self.lives[k]):
             above = max(above, 4)                     # room for a Z to rise
         tall = max(frame.image.height, -frame.dy)   # her top row in this frame, counted up from her feet
-        view = (*window(w, h, feet, tall, above, img.size), w, h)   # the part of the room on screen: she is in it
+        if big:   # the room is bigger than the screen: the camera follows her (Camera)
+            thing = None
+            if self.timeline[k][1] in PLAY:
+                for it in (shot.ball, shot.toy and shot.toy[0] == "mouse" and shot.toy[1:3]):
+                    if it and abs(it[1] - shot.cat[1]) < 16 and 0 <= it[0] < img.width:
+                        thing = (round(it[0]), round(it[1]))
+                        break
+            cx, cy = round(feet[0]), round(feet[1])
+            side, tallest = self.reach
+            her = (cx - side, cy - tallest - 1, cx + side, cy)   # room for her tallest pose and a clear row (banners and
+            #   Zs fit in that room: test_pet_rooms checks; going by them would make the view hop as a banner comes up)
+            self.last_view = self.camera.view(clock, her, thing, (w, h), img.size)
+            view = (*self.last_view, w, h)
+        else:
+            view = (*window(w, h, feet, tall, above, img.size), w, h)   # the part of the room on screen: she is in it
+            self.last_view = view[:2]
         for item, began, ended in self.lives[k]:
             if item[0] == "zzz" and self.place:   # Zs that show up on a pale floor, changing with the light
                 dark = 1.0 if shot.room == "night" else 0.0
@@ -270,98 +394,10 @@ class _Scene(Style):
                     dark = shot.fade[1] if shot.room == "night" else 1 - shot.fade[1]
                 item = ("zzz", tuple(round(a + (b - a) * dark) for a, b in zip(self.place.zzz, NIGHT_ZZZ)))
             overlay(draw, item, t - began, shot, ended - began, view)
+        if big:
+            x0, y0 = self.last_view
+            return img.convert("RGB").crop((x0, y0, x0 + w, y0 + h))
         return fit(img.convert("RGB"), self.ctx.width, self.ctx.height, feet, tall, above)
-
-    GLIDE = 600   # ms either side of now that the view's glide takes in
-    SETTLE = 200  # ms: a pause in her steps longer than this and the view starts to ease in by itself
-
-    def segments(self, t, R):
-        """The shots around ``t`` (the loop's own clock) as (start, end, shot, what), nearest first both
-        ways: back to t - R, then on to t + R. Past either end of a loop it wraps round; past
-        either end of free roaming's few actions, the end shot carries on."""
-        n, loop = len(self.starts), getattr(self, "roamer", None) is None
-        k = max(0, bisect.bisect_right(self.starts, t) - 1)
-        end = lambda i: self.starts[i + 1] if i + 1 < n else (self.total if loop else self.starts[i] + self.timeline[i][0].ms)   # noqa: E731
-        i, shift = k, 0.0
-        while True:                                     # back
-            a, b = self.starts[i] + shift, end(i) + shift
-            if not loop and i == 0:
-                a = -math.inf
-            yield a, b, *self.timeline[i]
-            if a <= t - R:
-                break
-            i -= 1
-            if i < 0:
-                i, shift = n - 1, shift - self.total
-        i, shift = k + 1, 0.0
-        while True:                                     # on
-            if i >= n:
-                if not loop:
-                    break
-                i, shift = 0, shift + self.total
-            a, b = self.starts[i] + shift, end(i) + shift
-            if a >= t + R:
-                break
-            if not loop and i == n - 1:
-                b = math.inf
-            yield a, b, *self.timeline[i]
-            i += 1
-
-    def stepped(self, t, here):
-        """When her feet last took a step walking or running (to ``here``, where they are at ``t``),
-        looking back 2 x SETTLE; None if they haven't, or if they got here some other way (a jump)."""
-        walk = False                                    # her feet got here walking or running
-        for a, b, seg, _ in self.segments(t, 2 * self.SETTLE):
-            if a > t:
-                break
-            there = (round(seg.cat[0]), round(seg.cat[1]))
-            if there != here:
-                return b if walk and t - b < 2 * self.SETTLE else None
-            walk = walk or seg.tag.startswith("walk")
-            if a <= t - 2 * self.SETTLE:
-                break
-        return None
-
-    def mean(self, t, R, width=0):
-        """Where she is, averaged over R ms either side of ``t``, the nearest moments counting most.
-        Worked out exactly from her shots, so it changes smoothly in time (sampling it would beat
-        against her steps and wobble). With ``width``: plus how far the view leans towards her ball
-        or toy mouse while she plays with it, averaged the same way."""
-        def upto(u):                                    # how much of the weight lies before t + u
-            if u <= -R:
-                return 0.0
-            if u >= R:
-                return 1.0
-            return (u + R) ** 2 / (2 * R * R) if u <= 0 else 1 - (R - u) ** 2 / (2 * R * R)
-
-        x = y = ahead = 0.0
-        for a, b, seg, what in self.segments(t, R):
-            w = upto(b - t) - upto(a - t)
-            if w <= 0:
-                continue
-            x += w * seg.cat[0]
-            y += w * seg.cat[1]
-            if width and what in PLAY:
-                ahead += w * lead(seg, width, self.stage.w)
-        return x + ahead, y
-
-    def focus(self, t, shot, width):
-        """What the view follows in a bigger room: she glides into it rather than whipping about when
-        she runs or jumps (it sets off as she gathers herself), and while she plays it leans towards
-        her ball or toy mouse. While she walks, the view takes its place only as her feet move and
-        holds still between her steps, so the room goes by on the same frames as she does. (Gliding
-        a pixel every frame while she steps two every other frame makes her shuffle to and fro on
-        screen.) Running, the same, however long her strides. When she stops, the view lets go over
-        SETTLE rather than snapping to where the glide has got to. Jumps glide every frame.
-        Never far from her: she stays on screen."""
-        cx, cy = round(shot.cat[0]), round(shot.cat[1])
-        at, last = t, self.stepped(t, (cx, cy))
-        if last is not None:                            # walking: held since her last step, and when she
-            gap = t - last                              # stops, let go gently: catching up at twice the pace
-            at = last if gap < self.SETTLE else last + 2 * (gap - self.SETTLE)
-        x, y = self.mean(min(at, t), self.GLIDE, width)
-        reach = round(width / 2) - 12                   # her middle stays this far in from the sides
-        return max(cx - reach, min(cx + reach, round(x))), max(cy - 8, min(cy + 4, round(y)))
 
     def locate(self, now, clock):
         """Where the loop is at this moment: (ms on the loop's clock, which shot)."""
