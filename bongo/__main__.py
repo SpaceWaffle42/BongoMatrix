@@ -223,6 +223,10 @@ def main(argv=None) -> int:
                 logging.warning("an update was cut short (a power cut?): asked the updater to finish it, or put the old version back")
         except Exception as error:
             logging.warning("couldn't check for an unfinished update: %s", error)
+        import pathlib
+
+        from bongo import events
+        events.start(pathlib.Path(args.config).parent)   # warnings kept on the card, and how the last run ended
     modules = discover()
     if args.command == "run":
         from bongo import addons
