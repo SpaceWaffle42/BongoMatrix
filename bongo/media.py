@@ -43,12 +43,22 @@ IMAGES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 VIDEOS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
 MAX_UPLOAD = 50 * 1024 * 1024        # one file
 MAX_LIBRARY = 1024 * 1024 * 1024     # everything in uploaded/
+MIN_FREE = 200 * 1024 * 1024         # left free on the card after an upload: room for settings, Wi-Fi and updates
 MAX_PIXELS = 16_000_000              # refuse decompression bombs
 MAX_FRAMES = 300                     # the Media module plays at most this many frames of a file
 MAX_DECODE = 50_000_000              # width x height x frames played: a few seconds' decoding on a Pi Zero
 SCREENS = ("splash", "sleep")        # screen files are named <screen>_*.ext, in either folder
 BOOT = "boot_"                       # built-in boot screens (boot_*.gif) are splash files: made to play once at start-up
 RENAMED = {"built-in/splash_reveal.gif": "built-in/boot_reveal.gif"}   # saved settings follow a built-in file's new name
+
+
+def storage(folder: Path | None = None) -> dict:
+    """The card's size and free space in bytes, where uploads are kept: {"total", "free"}."""
+    folder = folder or UPLOADED
+    while not folder.exists() and folder.parent != folder:   # (before the first upload, the folder above it)
+        folder = folder.parent
+    usage = shutil.disk_usage(folder)
+    return {"total": usage.total, "free": usage.free}
 
 
 def screen_of(name) -> str | None:
@@ -284,6 +294,9 @@ def save_upload(filename: str, stream) -> str:
             raise ValueError("that file is empty")
         if used_bytes() + size > MAX_LIBRARY:
             raise ValueError("the uploaded folder is full (1 GB); delete something first")
+        if storage()["free"] < MIN_FREE:   # (the file is already on the card, in its temporary place)
+            raise ValueError("the Matrix's SD card is nearly full, and it needs room to save settings and updates; "
+                             "delete something first")
         check_file(Path(tmp))
         target, n = UPLOADED / name, 2
         while target.exists():  # never overwrite: cat.gif, cat-2.gif, ...
