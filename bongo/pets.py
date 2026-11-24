@@ -8,8 +8,7 @@ to give them different ones. ``kind`` is an art set in resources/pet (``<kind>.j
 listed in ``<kind>.json`` ("shape.colour" ids; left out, the kind's default). The name is drawn in the pet's
 tiny 3x5 font (name tag, speech banners), so it keeps to the characters that font has.
 
-The built-in animals are our own art (tools/build_house_pets.py) and ship with every build. Last Tick's
-cat and bunny, when their pack is on this Matrix, are the extra kinds ``packcat`` and ``packbunny``.
+The animals are all our own art (tools/build_house_pets.py) and ship with every build.
 
 ``collar`` ("" for none) is worn every day; with ``dress_up`` on (the default) she also dresses
 for the season: a Santa hat or reindeer antlers through December to Boxing Day, a bow or heart
@@ -25,50 +24,24 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-import os
 
 from bongo import paths
 
 BUILT_IN = Path(__file__).resolve().parents[1] / "resources" / "pet"
-# a pack the owner imported from the dashboard (bongo/petpack.py); it wins over built-in art
-IMPORTED = Path(os.environ.get("BONGO_PET_ART", paths.DATA / "pet"))
-# a pack's toys and the bigger places' furniture and plants (and their names before 24 Nov 2026)
-NOT_ANIMALS = {"pack-toys", "pack-props", "pack-plants", "toys", "props", "plants"}
-# the built-in animals in the order Settings > Pet shows them; anything else found (a pack's kinds) follows
+# the animals in the order Settings > Pet shows them
 ORDER = ["cat", "bunny", "dog", "jackrussell", "spaniel", "hamster", "lizard", "flamingo", "monster", "rock"]
-PACK_KINDS = {"cat": "packcat", "bunny": "packbunny"}   # our kind -> the Last Tick kind it replaced
-PACK_ORDER = ["packcat", "packbunny"]
-PACK_COAT = re.compile(r"\d+(\.\d+)?")                   # Last Tick coat ids ("10", "1.3"); ours are "shape.colour"
 
 
 def art_file(name: str) -> Path:
-    """Where an art file (``packcat.json``, ``packcat-2.webp.b64``...) is: imported first, then built in. Our own
-    animals and places are always the built-in ones (an import only ever writes the pack's names, so a file of
-    ours in data/pet is a leftover, never something to show)."""
-    if "/" in name or name.split(".", 1)[0].split("-", 1)[0] in ORDER:
-        return BUILT_IN / name
-    imported = IMPORTED / name
-    return imported if imported.exists() else BUILT_IN / name
-
-
-def has_art() -> bool:
-    return bool(kinds_found())
+    """An art file (``cat.json``, ``places/places.webp.b64``...)."""
+    return BUILT_IN / name
 
 
 def kinds_found() -> list[str]:
-    """Every animal with art here: ours first, then a pack's (only when its art has been imported)."""
-    found = {p.stem for folder in (IMPORTED, BUILT_IN) for p in folder.glob("*.json")} - NOT_ANIMALS
-    return [k for k in ORDER + PACK_ORDER if k in found] + sorted(found - set(ORDER + PACK_ORDER))
+    """Every animal with art here, in ORDER."""
+    return [k for k in ORDER if (BUILT_IN / f"{k}.json").exists()]
 
 
-def reload() -> None:
-    """Forget cached art (after an import)."""
-    _index.cache_clear()
-    try:
-        from bongo.modules.pet import art
-        art.forget()
-    except ImportError:
-        pass
 NAME = re.compile(r"[A-Za-z0-9 '.!?-]{1,12}")
 
 
@@ -121,12 +94,10 @@ def default_coat(kind: str) -> str:
 
 def default_name(kind: str) -> str:
     """A new pet's name: the one its art comes with (Biscuit the dog, Krax the monster...)."""
-    name = _index(kind).get("name") or NAMES.get(kind)
+    name = _index(kind).get("name")
     return name if isinstance(name, str) and NAME.fullmatch(name) else Pet.name
 
 
-TITLES = {"packcat": "Pack cat", "packbunny": "Pack bunny"}   # (the pack's art has no titles of its own)
-NAMES = {"packbunny": "Bun"}                                    # (nor names: the pack cat is Mochi, as ever)
 GROUPS = {"jackrussell": "dog", "spaniel": "dog"}               # the dog's other shapes: Settings shows them under Dog
 
 
@@ -137,7 +108,7 @@ def accessory(kind: str) -> str:
 
 def title(kind: str) -> str:
     """What Settings > Pet calls the animal ("Jack Russell")."""
-    return _index(kind).get("title") or TITLES.get(kind) or kind.replace("_", " ").title()
+    return _index(kind).get("title") or kind.replace("_", " ").title()
 
 
 def group(kind: str) -> str:
@@ -146,8 +117,8 @@ def group(kind: str) -> str:
 
 
 def shape(coat: str) -> str:
-    """The shape part of a coat id ("shorthair" of "shorthair.tuxedo"; "" for a pack's coat ids)."""
-    return "" if PACK_COAT.fullmatch(coat or "") or "." not in (coat or "") else coat.split(".", 1)[0]
+    """The shape part of a coat id ("shorthair" of "shorthair.tuxedo")."""
+    return coat.split(".", 1)[0] if "." in (coat or "") else ""
 
 
 def kinds() -> list[str]:
@@ -207,91 +178,105 @@ def adopt(config: dict) -> list[str]:
     return []
 
 
+# -- Last Tick's pack art, removed 24 Nov 2026 ------------------------------------------------------------------
+PACK = {"packcat": "cat", "packbunny": "bunny"}    # the pack's kinds -> ours
+PACK_NAMES = {"packbunny": "Bun"}                   # (an unnamed pack bunny was called Bun; the pack cat Mochi, as ours)
+OUR_COAT = re.compile(r"[a-z_]+\.[a-z_]+")         # ours are "shape.colour"; the pack's "10", "1.3"
+# the files the pack import wrote (data/pet, and replaced/ in it; under the pack's names, or before 24 Nov 2026 ours)
+# and a private build's pack files (resources/pet)
+OLD_ART = re.compile(r"(packcat|packbunny|pack-\w+|cat|bunny|props|plants|toys)([-.][\w.]*)?\.(json|webp\.b64)")
+PACK_FILES = re.compile(r"(packcat|packbunny|pack-)[\w.-]*")
+UPLOAD = re.compile(r"tmp\w{8}\.zip")              # an upload left by an import cut short (tempfile.mkstemp in data/)
+DONE = ".pack-art-removed"                            # in data/: written once nothing is left to remove
+
+
 def migrate(config: dict) -> list[str]:
-    """At config load: our own art took over the kinds "cat" and "bunny" (24 Nov 2026), and Last Tick's became
-    "packcat" / "packbunny". A pet saved before that with a Last Tick coat ("10", "1.3") becomes the pack's
-    animal with the same coat and name when the pack is on this Matrix, else our own cat or bunny with the same
-    name in its default coat. A collar colour only the pack had is dropped. Running it again changes nothing.
-    (The files of a pack imported before then are renamed once at start-up: ``migrate_imported``.)
-    The change is made in memory at load (tidy), so until the config is next saved its note comes back on every
-    start; that also means a Matrix without the pack gets the pack cat back if the owner imports the pack later."""
+    """At config load: a pet of Last Tick's (``packcat`` / ``packbunny``, or a ``cat`` / ``bunny`` saved with one
+    of the pack's coat ids, which aren't "shape.colour") becomes our own cat or bunny in its default coat, with
+    the same name; its collar and dress_up stay where ours has them. A cat or bunny's collar colour only the pack
+    had goes too. Running it again changes nothing."""
     rule = config.get("pet")
-    if not isinstance(rule, dict) or rule.get("kind", Pet.kind) not in PACK_KINDS:
+    if not isinstance(rule, dict) or PACK.get(rule.get("kind", Pet.kind), rule.get("kind", Pet.kind)) not in PACK.values():
         return []
-    kind = rule.get("kind", Pet.kind)
-    coat = rule.get("coat")
-    if not (isinstance(coat, str) and PACK_COAT.fullmatch(coat)):
-        collar = rule.get("collar")
-        if collar not in (None, "") and collar not in collars(kind):   # (a coatless pet with the pack's collar)
-            config["pet"] = {k: v for k, v in rule.items() if k != "collar"}
-            return [f"pet: the {kind} has no {collar} collar any more; it wears none"]
-        return []
-    pack = PACK_KINDS[kind]
-    if pack in kinds_found():
-        config["pet"] = {**rule, "kind": pack}
-        return [f"pet: {kind} with a Last Tick coat is now {pack} (the pack's {kind})"]
-    keep = {k: v for k, v in rule.items() if k not in ("coat", "collar")}
-    if rule.get("collar") in collars(kind):
-        keep["collar"] = rule["collar"]
-    config["pet"] = {**keep, "kind": kind}
-    return [f"pet: the Last Tick {kind} art isn't here; {rule.get('name', Pet.name)} is now the built-in {kind}"]
+    old, coat, collar = rule.get("kind", Pet.kind), rule.get("coat"), rule.get("collar")
+    kind = PACK.get(old, old)
+    pack_coat = coat not in (None, "") and not (isinstance(coat, str) and OUR_COAT.fullmatch(coat))
+    pack_collar = collar not in (None, "") and collar not in collars(kind)
+    if old not in PACK and not pack_coat:
+        if not pack_collar:
+            return []
+        config["pet"] = {k: v for k, v in rule.items() if k != "collar"}
+        return [f"pet: our {kind} has no {collar} collar; it wears none"]
+    new = {k: v for k, v in rule.items() if k not in ("coat", "collar")} | {"kind": kind}
+    if not pack_collar and collar not in (None, ""):
+        new["collar"] = collar
+    if "name" not in rule and old in PACK_NAMES:
+        new["name"] = PACK_NAMES[old]
+    config["pet"] = new
+    return [f"pet: Last Tick's art is gone; {new.get('name', Pet.name)} is now our own {kind} in its default colour"]
 
 
-OLD_PACK_NAMES = {"cat": "packcat", "bunny": "packbunny", "props": "pack-props", "plants": "pack-plants",
-                  "toys": "pack-toys"}
-
-
-def _old_pack_file(folder: Path, old: str) -> bool:
-    """Is ``<old>.json`` in ``folder`` really what a pack import wrote (not some other art of that name)?"""
+def _pack_upload(f: Path) -> bool:
+    """Is ``f`` (data/tmpXXXXXXXX.zip) a pack zip an interrupted import left? (its list of names only)"""
+    import zipfile
     try:
-        index = json.loads((folder / f"{old}.json").read_text())
-    except (OSError, ValueError):
+        with zipfile.ZipFile(f) as z:
+            return any("cats_animations/" in n or "/Bunny " in n or n.endswith("/shrubs_10.png") for n in z.namelist())
+    except (OSError, zipfile.BadZipFile):
         return False
-    if not isinstance(index, dict):
-        return False
-    if old == "cat":
-        coats = index.get("coats")
-        return isinstance(coats, list) and bool(coats) and \
-            all(isinstance(c, dict) and PACK_COAT.fullmatch(str(c.get("id", ""))) for c in coats)
-    if old == "bunny":
-        return index.get("room_from") in ("cat", "packcat")
-    from bongo import petpack
-    known = {"props": set(petpack.PROPS) | {f"{k}_full" for k in petpack.PROPS}, "plants": set(petpack.PLANTS),
-             "toys": set(petpack.TOYS)}[old]
-    return bool(index) and set(index) <= known
 
 
-def migrate_imported(folder: Path | None = None) -> list[str]:
-    """Once, at start-up: a pack imported before the rename wrote cat*/bunny*/props*/plants*/toys* into data/pet.
-    Rename exactly the pack's own files to the pack names: renames only, nothing is rewritten (art.py knows the
-    pack's kinds live in the pack room, whatever their JSON says). The .json files go last, so a start cut short
-    still recognises the pack next time and finishes the job. Where a newer import already has the new name, the
-    old file is moved aside into ``replaced/`` (never deleted). Never raises: what can't be done is said in a note."""
-    folder = folder or IMPORTED
-    if not folder.is_dir():
+def remove_pack_files(data: Path | None = None, built: Path | None = None) -> list[str]:
+    """Once, at start-up, until it has all gone: delete the pack's art wherever it was put (the files the dashboard's
+    import wrote in data/pet and its replaced/ folder, an upload an interrupted import left in data/, and a private
+    build's pack files in resources/pet), and nothing else. Logs what it removed. Never raises: what can't be
+    removed is one warning, and on later starts a debug line, until it can be; then data/.pack-art-removed says
+    there is nothing more to look for. Returns the notes it logged."""
+    import logging
+    log = logging.getLogger("bongo.pets")
+    data, built = data or paths.DATA, built or BUILT_IN
+    done = data / DONE
+    if done.exists():
         return []
-    notes, moved, failed = [], 0, set()
-    packs = {old for old in OLD_PACK_NAMES if _old_pack_file(folder, old)}
-    for f in sorted((p for p in folder.iterdir() if p.is_file()), key=lambda p: (p.name.endswith(".json"), p.name)):
-        stem = f.name.split(".", 1)[0]
-        old = stem.split("-", 1)[0] if stem.split("-", 1)[0] in ("cat", "bunny") else stem
-        if old not in packs or not (f.name.endswith(".json") or f.name.endswith(".webp.b64")):
-            continue
-        target = folder / (OLD_PACK_NAMES[old] + f.name[len(old):])
-        if f.name == f"{old}.json" and old in failed:
-            continue                     # kept, so the next start still knows these files are the pack's
+    found, failed, gone = [], [], []
+    for folder, names in ((data / "pet", OLD_ART), (data / "pet" / "replaced", OLD_ART), (built, PACK_FILES),
+                          (data, UPLOAD)):
         try:
-            if target.exists():
-                aside = folder / "replaced"
-                aside.mkdir(exist_ok=True)
-                f.rename(aside / f.name)
-            else:
-                f.rename(target)
-            moved += 1
+            found += sorted(f for f in folder.iterdir() if names.fullmatch(f.name) and f.is_file()
+                            and (names is not UPLOAD or _pack_upload(f)))
+        except FileNotFoundError:
+            pass
         except OSError as error:
-            failed.add(old)
-            notes.append(f"pet: couldn't rename the imported {f.name} ({error}); the Pet screens may show the pack's art as ours")
-    if moved:
-        reload()
-        notes.insert(0, f"pet: the imported Last Tick art is now the pack's own kinds ({moved} files renamed)")
+            failed.append(f"{folder} ({error.strerror or error})")
+    for f in found:
+        try:
+            f.unlink()
+            gone.append(f.name)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            failed.append(f"{f} ({error.strerror or error})")
+    for folder in (data / "pet" / "replaced", data / "pet"):
+        try:
+            folder.rmdir()
+        except OSError:
+            pass                                      # gone, or something else is in it: left as it is
+    notes = []
+    if gone:
+        notes.append(f"pet: removed Last Tick's pack art ({len(gone)} file{'s' * (len(gone) != 1)}: "
+                     f"{', '.join(gone[:6])}{', ...' if len(gone) > 6 else ''})")
+        log.warning(notes[-1])
+    tried = data / (DONE + ".tried")
+    if failed:
+        notes.append(f"pet: couldn't remove Last Tick's art from {len(failed)} place{'s' * (len(failed) != 1)} "
+                     f"(first: {failed[0]}); trying again next start")
+        log.log(logging.DEBUG if tried.exists() else logging.WARNING, notes[-1])
+    try:
+        if failed:
+            tried.touch()
+        else:
+            done.touch()
+            tried.unlink(missing_ok=True)
+    except OSError:
+        pass                                          # (a read-only data/: it just looks again next start)
     return notes

@@ -88,7 +88,7 @@ class Roamer:
                 s = Script(self.art, self.stage, cat=list(self.stage.centre), free=True)
                 s.ball = list(self.stage.at(44, self.art.tuning.get("ball", scenes.BALL_HOME)[1]))   # out on the open floor
                 return s
-        s = Script(self.art, self.stage, room=last.room, cat=list(last.cat), perch=last.perch, free=True)
+        s = Script(self.art, self.stage, room=last.room, cat=list(last.cat), perch=last.perch, ground=last.ground, free=True)
         s.ball = list(last.ball or self.ball_was or self.stage.at(44, self.art.tuning.get("ball", scenes.BALL_HOME)[1]))
         s.enter = last
         if last.tag in LYING:
@@ -103,7 +103,7 @@ class Roamer:
         n = self.needs
         odds = {"eat": max(0.0, n["food"] - 0.55) ** 2 * 30, "nap": n["sleep"] ** 3 * 5, "ball": n["play"] ** 2 * 2.5,
                 "mouse": n["play"] ** 2 * 1.2, "zoom": n["play"] ** 3 * 1.2, "wash": n["wash"] ** 2 * 2,
-                "wander": 0.5, "sit": 0.5, "bee": 0.05, "perch": 0.2 if self.room.perches else 0,
+                "wander": 0.5, "sit": 0.5, "perch": 0.2 if self.room.perches else 0,
                 "scratch": 0.2 if self.room.posts else 0}
         up = bool(self.last is not None and self.last.perch)
         if not up and (self.clock - self.grounded).total_seconds() < TREE_REST:
@@ -113,8 +113,6 @@ class Roamer:
             odds["nap"] = 0                   # nearly bedtime: she saves it for the night
         if scenes.stalk_toy(self.art) is None or self.art.tuning.get("toy") == "carrot":
             odds["mouse"] = 0
-        if "bee" not in self.art.toys:
-            odds["bee"] = 0
         for recent in self.did[-2:]:          # not the same thing three times running
             if self.did[-2:].count(recent) == 2:
                 odds[recent] = 0
@@ -133,13 +131,13 @@ class Roamer:
         while here:
             _, _, below, floor = perches[here]
             if below:
-                s.jump_to(*perches[below][1], perch=perches[below][0])
+                s.jump_to(*perches[below][1], perch=perches[below][0], ground=self.room.ground(perches[below][0]))
             else:
                 s.jump_to(*floor)
-                s.perch = ""
+                s.perch, s.ground = "", None
                 self.grounded = self.clock
             here = below or None
-        s.perch = ""
+        s.perch, s.ground = "", None
 
     def walk(self, s: Script, x, y):
         self.down(s)
@@ -256,7 +254,7 @@ class Roamer:
         for name in chain:
             piece, feet, _, _ = perches[name]
             s.hold("meow_sit", 0, 350)        # sizing it up
-            s.jump_to(*feet, perch=piece)
+            s.jump_to(*feet, perch=piece, ground=self.room.ground(piece))
         s.hold("meow_sit", 0, self.rng.randint(900, 2000))
         s.play(self.rng.choice(["yawn_sit", "wash_sit", "meow_sit"]))
         s.hold("meow_sit", 0, self.rng.randint(800, 2500))
@@ -310,9 +308,6 @@ class Roamer:
     def mouse(self, s: Script):
         self._scene(s, "toy")
         self.needs["play"] *= 0.3
-
-    def bee(self, s: Script):
-        self._scene(s, "bee")
 
     def zoom(self, s: Script):
         """Zoomies: dashes to and fro across the open floor (the view stays put while she tears about)."""

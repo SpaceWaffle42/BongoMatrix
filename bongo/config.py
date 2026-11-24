@@ -374,15 +374,16 @@ def tidy(config: dict, modules: dict[str, Module], path: Path | None = None) -> 
         notes += _screen_files(config.get(screen), screen)
     if all(isinstance(config.get(key) or [], list) for key in ("playlist", "overlays")):   # (else validate() says so)
         notes += pets.adopt(config)  # before the Pet entries lose their own name
-    notes += pets.migrate(config)    # Last Tick's cat and bunny became packcat / packbunny
+    notes += pets.migrate(config)    # Last Tick's cat and bunny are gone: ours instead
     off = config.get("modules_off")
     if isinstance(off, list) and any(m not in modules for m in off):   # a module that's no longer installed
         config["modules_off"] = [m for m in off if m in modules]
         notes.append(f"modules_off: forgot {sorted(set(off) - set(modules))} (not installed)")
     notes += _adopt_location(config, modules)
-    for key in ("playlist", "overlays"):  # entries of a module that moved into another one
+    for key in ("playlist", "overlays"):  # entries of a module that moved into another one (or of a style it dropped)
         for i, entry in enumerate(_listed(config, key)):
-            if not isinstance(entry, dict) or entry.get("module") in modules:
+            if not isinstance(entry, dict) or (entry.get("module") in modules and (key == "overlays" or entry.get("style")
+                                                                                     in modules[entry["module"]].styles)):
                 continue
             for module in list(modules.values()):
                 styles = module.renames.get(entry.get("module"))

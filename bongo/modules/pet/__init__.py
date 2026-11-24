@@ -1,5 +1,4 @@
-"""Pet: the Matrix's pet (Mochi the cat by default; ten animals of our own, plus the pack's cat and bunny
-where that art is) living in its own home (a living room, a burrow, a park, a cage, a terrarium, a lagoon,
+"""Pet: the Matrix's pet (Mochi the cat by default; ten animals of our own) living in its own home (a living room, a burrow, a park, a cage, a terrarium, a lagoon,
 a cave, a garden plot), drawn smaller further back up the floor.
 
 Every mode from the remastered Cat 10 engine is a style, Life plays them through the day,
@@ -13,6 +12,15 @@ from .places import LABELS
 from .scenes import MODES
 from .styles import Life, Wander, mode_style
 
+
+def migrate(settings: dict) -> list[str]:
+    """The bee (Last Tick's art) is gone since 24 Nov 2026: a saved list of Life's moments that had it keeps the rest."""
+    if isinstance(settings.get("modes"), list) and "bee" in settings["modes"]:
+        settings["modes"] = [m for m in settings["modes"] if m != "bee"]
+        return ["pet: the bee is gone from Life's moments"]
+    return []
+
+
 MODULE = Module(
     id="pet",
     name="Pet",
@@ -24,4 +32,6 @@ MODULE = Module(
     styles={"life": Life, **{mode: mode_style(mode) for mode in MODES}},
     overlays={"wander": Wander},
     choice_names={"place": {"labels": LABELS}},
+    renames={"pet": {"bee": "idle"}},   # a saved Bee screen (gone with Last Tick's art) is a quiet moment
+    migrate=migrate,
 )

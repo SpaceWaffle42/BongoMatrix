@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw
 
 from bongo.module import Style
 
-from .art import H, W, load, missing, no_art
+from .art import H, W, at_size, load, missing, no_art
 from bongo.pets import wearing
 
 from . import places, roam
@@ -292,15 +292,19 @@ class _Scene(Style):
 
     def setup(self):
         self.art = None
-        if missing(self.ctx.pet.kind):                  # a public build before a pack is imported
+        if missing(self.ctx.pet.kind):                  # (a checkout without its art)
             return
         self.art = load(self.ctx.pet.kind, self.ctx.pet.coat, wearing(self.ctx.pet, self.ctx.now().date()))
         self.place = places.get(self.settings["place"])
-        # a bigger room has its own size, bed, bowl and floor; the house is her own home (the pack kinds' room
-        # keeps its old layout) and the places all have the front-floor one
+        # a bigger room has its own size, bed, bowl and floor; her own home and the places all have the front-floor one
         self.stage = stage_for(self.art, self.place)
         day, empty, night = places.rooms(self.settings["place"]) if self.place else (self.art.room, self.art.empty, self.art.night)
         self.rooms = {"day": day, "empty": empty, "night": night}
+        if hasattr(self.place, "floor_pieces"):   # a bigger room: its bowl's own outline, full or empty
+            full, empty = self.place.floor_pieces(True), self.place.floor_pieces(False)
+            self.pieces = {"day": full, "night": full, "empty": empty}
+        else:
+            self.pieces = dict.fromkeys(("day", "night", "empty"), (self.place or self.art).pieces)
         self.timeline = record_loop(self.art, self.modes(), self.ctx.pet.name, self.stage)   # seamless: scenes link up
         self.starts, t = [], 0.0
         for shot, _ in self.timeline:
@@ -309,6 +313,7 @@ class _Scene(Style):
         self.total = t
         self.lives = lifetimes(self.timeline, self.starts, self.total)
         self.camera, self.last_view = Camera(), None
+        self.touching = {}   # "ball" / "toy" -> whether it is in front of her, while it touches her (things)
         frames = [f for a in self.art.animations.values() for f in a]   # her widest reach from her feet and her
         self.reach = (max(max(-f.dx, f.dx + f.image.width) for f in frames),   # tallest pose: the view keeps room
                       max(max(f.image.height, -f.dy) for f in frames))         # for them, so it doesn't follow her legs
@@ -335,43 +340,14 @@ class _Scene(Style):
         if shot.fade:   # the room changing: lights going out or up, the bowl filling or emptying
             img = Image.blend(self.room(shot.fade[0], clock).convert("RGBA"), img, shot.fade[1])
         big = (self.stage.w, self.stage.h) != (W, H)
-        empty = img.copy() if big else None   # the room without her: what's in front of her is drawn back from it
-        ball_on_top = None
-        if shot.ball:
-            ball = art.ball
-            if shot.fade and "night" in (shot.fade[0], shot.room):   # dims with the light
-                lit = 1 - shot.fade[1] if shot.room == "night" else shot.fade[1]
-                ball = ball.copy()
-                ball.putalpha(ball.getchannel("A").point(lambda a: int(a * lit)))
-            if self.stage.front and shot.cat[1] < shot.ball[1]:   # she's further back up the floor: it's in front
-                ball_on_top = ball
-            else:
-                img.alpha_composite(ball, (int(shot.ball[0]) - 4, int(shot.ball[1]) - 4))
-        # a bee flies in front of her; a toy on the floor is behind her, except beside a sitting cat,
-        # where it would hide under her tail
-        flying = shot.toy and (shot.toy[0] == "bee" or shot.tag in ("meow_sit", "wash_sit"))
-        if shot.toy and not flying:
-            self.draw_toy(img, shot.toy, t)
-        if big:   # her ball and toy go behind what stands in front of them, as she does
-            for thing in (shot.ball, None if flying or not shot.toy else shot.toy[1:3]):
-                if thing:
-                    self.place.over(img, empty, (thing[0], thing[1] - 3))
         frame = art.animations[shot.tag][shot.index]
-        depth = self.stage.scale(shot.cat[1])
-        if depth < 1:   # further back up the floor, smaller (whole rows of height, through her feet)
-            frame = art.at_depth(frame, self.stage.rows(art.ref_height, shot.cat[1]))
-        # (rounded half up, the one place her position is rounded: never banker's rounding, which would
-        # alternate on half pixels)
-        x, y = math.floor(shot.cat[0] + 0.5) + frame.dx, math.floor(shot.cat[1] + 0.5) + frame.dy
-        layer = Image.new("RGBA", img.size)
-        layer.paste(frame.image, (x, y), frame.image)
-        img.alpha_composite(layer)
-        if ball_on_top is not None:
-            img.alpha_composite(ball_on_top, (int(shot.ball[0]) - 4, int(shot.ball[1]) - 4))
-        if big:
-            self.place.over(img, empty, shot.cat, shot.perch)
-        if flying:
-            self.draw_toy(img, shot.toy, t)
+        depth = self.stage.scale(ground(shot))
+        if depth < 1:   # further back, smaller (whole rows of height, through her feet)
+            frame = art.at_depth(frame, self.stage.rows(art.ref_height, ground(shot)))
+        lit = 1.0
+        if shot.fade and "night" in (shot.fade[0], shot.room):   # her ball dims with the light
+            lit = 1 - shot.fade[1] if shot.room == "night" else shot.fade[1]
+        self.draw_scene(img, shot, frame, lit)
         if self.place:   # what moves over her: snow, fireflies, leaves (crossing over as the lights change)
             img = img.convert("RGB")
             if shot.fade and "night" in (shot.fade[0], shot.room):
@@ -393,7 +369,7 @@ class _Scene(Style):
         if big:   # the room is bigger than the screen: the camera follows her (Camera)
             thing = None
             if self.timeline[k][1] in PLAY:
-                for it in (shot.ball, shot.toy and shot.toy[0] != "bee" and shot.toy[1:3]):
+                for it in (shot.ball, shot.toy and shot.toy[1:3]):
                     if it and abs(it[1] - shot.cat[1]) < 16 and 0 <= it[0] < img.width:
                         thing = (round(it[0]), round(it[1]))
                         break
@@ -423,25 +399,87 @@ class _Scene(Style):
         t = clock % self.total
         return t, bisect.bisect_right(self.starts, t) - 1
 
-    def draw_toy(self, img, toy, t):
-        name, x, y, flipped, bitten = toy
-        if name not in self.art.toys:
-            return
-        pic, dx, dy = self.art.toys[name]
-        if name == "bee" and int(t // 100) % 2 == 0:  # buzzing: wings flick up above her body
-            wings = self.art.toys["bee_wings"][0]
-            up = Image.new("RGBA", (pic.width, pic.height + 3))
-            up.paste(wings, (0, 0), wings)
-            up.paste(pic, (0, 3), pic)
-            pic, dy = up, dy - 3
-        if flipped:
-            pic = pic.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
-        if bitten:  # eaten from the end nearest her (the left, as she faces right)
-            pic = pic.crop((min(bitten, pic.width - 1), 0, pic.width, pic.height))
-            dx += bitten
-        layer = Image.new("RGBA", img.size)
-        layer.paste(pic, (int(round(x)) + dx, int(round(y)) + dy), pic)
-        img.alpha_composite(layer)
+    def things(self, shot, frame, lit) -> list:
+        """What is drawn over the room this frame, as (depth key, tie order, draw(img), what: "piece", "her" or
+        "toy" with the box it covers): the floor's pieces (copied
+        back from the room as drawn, so they are lit as it is), her, her ball and her toy, by the lowest row of each
+        (hers: one above her ground row, ``ground``). Ties: a piece, then her, then a toy. Up on a piece she is
+        just in front of it. A toy touching her goes with her: her key, and the side of her it was on when they
+        met (her ball in front of her only while she is further back up the front floor, a toy only while she sits
+        over it; one well behind her, behind) until they part, so it never flips from one side of her to the other
+        while they touch; one she is playing with (not well behind her) is her size too. Toys shrink with depth as she does, about their ground point; on the front rows
+        they are as drawn."""
+        art, stage, row = self.art, self.stage, ground(shot)
+        x, y = math.floor(shot.cat[0] + 0.5) + frame.dx, math.floor(shot.cat[1] + 0.5) + frame.dy
+        her = math.floor(row + 0.5) - 1 + (0.5 if shot.perch else 0)
+        out = [(key, 0, lambda img, px=px, py=py, mask=mask: img.paste(
+                    self.bare.crop((px, py, px + mask.width, py + mask.height)), (px, py), mask), ("piece", name))
+               for key, px, py, mask, name in self.pieces[shot.room] if name != shot.perch]
+        body = frame.image.getbbox() or (0, 0, 0, 0)
+        body = (x + body[0], y + body[1], x + body[2], y + body[3])
+        out.append((her, 1, lambda img: _paste(img, frame.image, x, y), ("her", body)))
+
+        def toy(what, pic, ox, oy, tx, ty, over, snap, flip=False, bite=0, dim=1.0):
+            """``pic`` with its top left at (``ox``, ``oy``) from the toy's point (``tx``, ``ty``: whole pixels by
+            ``snap``), shrunk about the middle of its lowest row (which stays where it is) by the depth of that row
+            (or of hers, while she plays with it)."""
+            lowest = snap(ty) + oy + pic.getbbox()[3] - 1           # its lowest row, as drawn full size
+
+            def placed(on):
+                small = at_size(pic, round(pic.height * stage.scale(on)), art.sized)
+                k = small.height / pic.height
+                left = snap(tx) + round(ox * k + (pic.width * k - small.width) / 2)
+                return small, k, left, lowest + 1 - (small.getbbox() or (0, 0, 0, small.height))[3]
+            small, k, left, top = placed(lowest + 1)
+            box = small.getbbox() or (0, 0, 0, 0)
+            touching = (left + box[0] < body[2] and body[0] < left + box[2] and top + box[1] < body[3]
+                        and body[1] < top + box[3])
+            held = touching and lowest + 1 >= row - 4          # touching her, not well behind her: hers to play with
+            if held:
+                small, k, left, top = placed(row)
+            if touching:   # the side it touched her on, kept until they part (frames come in order)
+                over = self.touching.setdefault(what, over and held)
+            else:
+                self.touching.pop(what, None)
+            if flip:
+                small = small.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+            if dim < 1:
+                small = small.copy()
+                small.putalpha(small.getchannel("A").point(lambda a: int(a * dim)))
+            if bite:   # eaten from the end nearest her (the left, as she faces right)
+                cut = min(round(bite * k), small.width - 1)
+                small, left = small.crop((cut, 0, small.width, small.height)), left + cut
+            key, order = (her, 2 if over else 0.5) if touching else (lowest, 2)
+            box = small.getbbox() or (0, 0, 0, 0)
+            out.append((key, order, lambda img: _paste(img, small, left, top),
+                        ("toy", (left + box[0], top + box[1], left + box[2], top + box[3]))))
+
+        if shot.ball:
+            over = stage.front and math.floor(shot.cat[1] + 0.5) < math.floor(shot.ball[1] + 0.5)   # (rows as drawn)
+            toy("ball", art.ball, -4, -4, *shot.ball, over, int, dim=lit)
+        if shot.toy and shot.toy[0] in art.toys:
+            name, tx, ty, flipped, bitten = shot.toy
+            pic, dx, dy = art.toys[name]
+            toy("toy", pic, dx, dy, tx, ty, shot.tag in ("meow_sit", "wash_sit"), lambda v: int(round(v)), flipped, bitten)
+        return out
+
+    def draw_scene(self, img, shot, frame, lit):
+        """Everything over the room, back to front: one sort of ``things``."""
+        self.bare = img.copy()   # the room as it is this frame, without her: what's in front of her comes from it
+        for _, _, draw, _ in sorted(self.things(shot, frame, lit), key=lambda d: d[:2]):
+            draw(img)
+
+
+def ground(shot) -> float:
+    """The floor row she stands on, for her size and her place in the draw order: her feet row, or up on a piece
+    the row that piece stands on (blended over a jump: scenes.Script.jump_to), so climbing never shrinks her."""
+    return shot.cat[1] if shot.ground is None else shot.ground
+
+
+def _paste(img, pic, x, y):
+    layer = Image.new("RGBA", img.size)
+    layer.paste(pic, (x, y), pic)
+    img.alpha_composite(layer)
 
 
 def mode_style(mode: str) -> type:
@@ -450,7 +488,7 @@ def mode_style(mode: str) -> type:
 
 
 DAYTIME = ["idle", "eating", "washing", "playing", "scratching", "napping", "waking", "zoomies",
-           "asking", "begging", "grumpy", "name_tag", "toy", "bee"]
+           "asking", "begging", "grumpy", "name_tag", "toy"]
 
 
 class Life(_Scene):

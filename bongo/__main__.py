@@ -199,6 +199,16 @@ def keep_playing(config: dict, path, modules, live, play_config, wait: float = 1
         logging.info("config reloaded")
 
 
+def remove_old_pet_art() -> None:
+    """Last Tick's pack art is gone (24 Nov 2026): delete any copies, before the config is read. Never in the way of
+    starting (pets.remove_pack_files logs what it removed, and what it couldn't)."""
+    try:
+        from bongo import pets
+        pets.remove_pack_files()
+    except Exception:  # noqa: BLE001 - files in data/ must never stop the Matrix starting
+        logging.exception("old pet art: couldn't remove the pack's files")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="bongo")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -323,12 +333,7 @@ def main(argv=None) -> int:
     from bongo.overlays import Overlays
     from bongo.player import play
 
-    from bongo import pets
-    try:   # once, before the config is read: a pack imported before 24 Nov 2026 (never in the way of starting)
-        for note in pets.migrate_imported():
-            logging.warning("old pet art: %s", note)
-    except Exception:  # noqa: BLE001 - files in data/ must never stop the Matrix starting
-        logging.exception("old pet art: couldn't rename the imported pack's files")
+    remove_old_pet_art()
     config = cfg.load(args.config)
     for note in cfg.tidy(config, modules, args.config):
         logging.warning("old config: %s", note)

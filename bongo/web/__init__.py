@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 from flask import Flask, Response, abort, jsonify, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
 
-from bongo import animator, config as cfg, logo, net, netname, pets, petpack, sprite_preview, update
+from bongo import animator, config as cfg, logo, net, netname, pets, sprite_preview, update
 from bongo import addons, events, media, places, private, standins
 from bongo.fonts import Fonts, names as font_names, table as font_table
 from bongo.module import Context
@@ -124,7 +124,6 @@ def verify_new(current: dict, merged: dict, modules: dict) -> list[str]:
     return problems
 
 
-PACK_UPLOAD = 300 * 1024 * 1024  # a pet pack zip from itch.io
 FONT_FILE = re.compile(r"fonts/[A-Za-z0-9_-]+\.woff2")   # the dashboard's own fonts, by plain file name only
 
 
@@ -192,7 +191,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         path = request.path
         if not path.startswith("/api/"):
             return None
-        upload = request.method == "POST" and path in ("/api/media", "/api/pets/import", "/api/animator/import", "/api/addons/upload")
+        upload = request.method == "POST" and path in ("/api/media", "/api/animator/import", "/api/addons/upload")
         if upload and request.headers.get("X-Bongo-Upload") != "1":
             abort(415)  # a custom header: a cross-site form can't set it, and fetch would need CORS
         if request.method not in ("GET", "HEAD") and not upload and not request.is_json:
@@ -374,47 +373,6 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
                                "coats": [{**c, "shape": pets.shape(c["id"]), "face": face_uri(k, c["id"])}
                                          for c in pets.coat_names(k)]}
                               for k in pets.kinds()])
-
-    pack_job = {"state": "idle", "message": "", "made": []}   # one pet pack import at a time
-
-    @app.get("/api/pets/import")
-    def pet_import_status():
-        return jsonify({**pack_job, "has_art": pets.has_art()})
-
-    @app.post("/api/pets/import")
-    def pet_import():
-        """The owner's own Last Tick pack zip: the Matrix builds the Pet art from it (it's licensed to
-        them, so the public build can't ship it). Building takes a minute or two on a Pi."""
-        if pack_job["state"] == "working":
-            return jsonify(error="A pet pack is already being imported."), 409
-        request.max_content_length = PACK_UPLOAD
-        upload = request.files.get("file")
-        if upload is None or not upload.filename:
-            abort(400, "choose the pack's zip file")
-        pets.IMPORTED.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(suffix=".zip", dir=pets.IMPORTED.parent)
-        with os.fdopen(fd, "wb") as f:
-            shutil.copyfileobj(upload.stream, f)
-        pack_job.update(state="working", message=f"Building the pet art from {upload.filename}...", made=[])
-
-        def build():
-            try:
-                made = petpack.import_zip(Path(tmp), pets.IMPORTED)
-                pets.reload()
-                face_uri.cache_clear()
-                pack_job.update(state="done", made=made,
-                                message="Imported. The Pet screens use it from the next time they come round.")
-                logging.getLogger("bongo.web").info("pet pack imported: %s", "; ".join(made))
-            except petpack.PackError as error:
-                pack_job.update(state="failed", message=f"Couldn't import {upload.filename}: {error}.")
-            except Exception:  # noqa: BLE001 - shown on the dashboard; details in the log
-                logging.getLogger("bongo.web").exception("pet pack import failed")
-                pack_job.update(state="failed", message="The import failed; see Logs.")
-            finally:
-                Path(tmp).unlink(missing_ok=True)
-
-        threading.Thread(target=build, name="pet-pack", daemon=True).start()
-        return jsonify(pack_job), 202
 
     @app.get("/api/frame.png")
     def frame():

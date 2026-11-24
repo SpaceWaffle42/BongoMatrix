@@ -1,4 +1,4 @@
-"""The pet art: the atlases built by tools/build_pet_atlas.py, unpacked once per coat.
+"""The pet art: the atlases built by tools/build_house_pets.py, unpacked once per coat.
 
 ``<kind>.json`` holds one set of frame rectangles that fits every coat. Each coat names the
 drawing it uses (``<kind>.webp.b64`` for the default one, which also holds the room and the ball,
@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from functools import lru_cache
-from pathlib import Path
 
 from PIL import Image
 
@@ -39,6 +38,7 @@ class Art:
     ball: Image.Image   # RGBA
     tuning: dict = field(default_factory=dict)  # per-animal scene tweaks (see scenes.py): bowl, ball, reach, zoomies, toy, gait
     toys: dict = field(default_factory=dict)    # name -> (image, dx, dy): placed by the middle of its bottom edge
+    pieces: tuple = ()  # what stands on her home's floor: (depth key, x, y, mask, name) (floor_pieces)
     sized: dict = field(default_factory=dict, repr=False)   # (frame id, rows) -> the frame shrunk for depth
 
     @property
@@ -71,7 +71,7 @@ def _index(kind: str) -> dict:
 
 @lru_cache(maxsize=16)
 def _atlas(name: str) -> Image.Image:
-    # a lossless WebP kept as base64 text (see tools/build_pet_atlas.py)
+    # a lossless WebP kept as base64 text (see tools/build_house_pets.py)
     return Image.open(io.BytesIO(base64.b64decode(art_file(f"{name}.webp.b64").read_text()))).convert("RGBA")
 
 
@@ -108,22 +108,6 @@ def sheet(kind: str = "cat", coat: str = "") -> Image.Image:
     return cats
 
 
-# How far the body moves on entering each walk frame: the pushes land on the frames where the art's
-# planted paws sweep back, so the paws stay put instead of treading (review, 12 Nov). 12 px per cycle.
-GAIT = {"packcat": {"walk_right": (1, 2, 2, 1, 1, 2, 2, 1), "walk_left": (1, 2, 2, 1, 1, 2, 2, 1),
-                "walk_left_d": (1, 1, 1, 1, 1, 1)}}
-
-
-PACK_KINDS = ("packcat", "packbunny")   # Last Tick's cat and bunny: their own room and layout, the pack's toys
-
-
-def tuned(kind: str, index: dict) -> dict:
-    # a pack's kinds always live in the pack room's layout, whatever their JSON says (an import made before the
-    # rename has no "stage" in it)
-    return {**({"gait": GAIT[kind]} if kind in GAIT else {}), **index.get("tuning", {}),
-            **({"stage": "pack"} if kind in PACK_KINDS else {})}
-
-
 @lru_cache(maxsize=16)
 def load(kind: str = "cat", coat: str = "", outfits: tuple = ()) -> Art:
     """The art for one pet (bongo/pets.py): ``<kind>.json``, the coat's atlas, and the outfits
@@ -131,40 +115,42 @@ def load(kind: str = "cat", coat: str = "", outfits: tuple = ()) -> Art:
     index, atlas = _index(kind), sheet(kind, coat)
     crop = lambda r: atlas.crop((r[0], r[1], r[0] + r[2], r[1] + r[3]))
     airborne = set(index.get("airborne", ()))
-    lift = index.get("lift", LIFT)   # our house-style kinds set {}: Billy rejected any walk bob
     animations = {}
     for tag, frames in index["animations"].items():
         raw = [Frame(crop(f), f[4], f[5], f[6]) for f in frames]
-        placed = aloft(raw) if tag in airborne else [grounded(tag, i, f, lift) for i, f in enumerate(raw)]
+        placed = aloft(raw) if tag in airborne else [grounded(f) for f in raw]
         worn = [o for o in outfits if o in index.get("outfits", {})]
         if worn:
             under = set(index.get("outfit_under", ()))
             placed = [dressed(kind, f, f.dy - r.dy, [(index["outfits"][o].get(c), o in under) for o in worn])
                       for f, r, c in zip(placed, raw, index["cells"][tag])]
         animations[tag] = placed
-    if "room_from" in index:  # this animal lives in another one's room (the bunny in the cat's)
-        # (an import made before 24 Nov 2026 still says the pack bunny lives in "cat": the pack cat's room)
-        home = load("packcat" if kind in PACK_KINDS and index["room_from"] == "cat" else index["room_from"])
-        return Art(animations, home.room, home.empty, home.night, home.ball, tuned(kind, index), home.toys)
     room = crop(index["room"]).convert("RGB")
-    # a kind may carry its own empty-bowl room and night base (the house-style kinds); else they're made from the room
-    empty = crop(index["empty"]).convert("RGB") if "empty" in index else empty_bowl(room)
-    base = crop(index["night"]).convert("RGB") if "night" in index else room
-    dark = lit_night(base, index["night_light"]) if "night_light" in index else night(base)
-    own = {name: (crop(r), r[4], r[5]) for name, r in index.get("toys", {}).items()}   # her own toys first
-    shared = toys() if kind in PACK_KINDS else {}   # the pack's mouse, carrots and bee are for the pack's animals only
-    return Art(animations, room, empty, dark, crop(index["ball"]), tuned(kind, index), {**shared, **own})
+    empty, base = crop(index["empty"]).convert("RGB"), crop(index["night"]).convert("RGB")
+    toys = {name: (crop(r), r[4], r[5]) for name, r in index.get("toys", {}).items()}
+    return Art(animations, room, empty, lit_night(base, index["night_light"]), crop(index["ball"]),
+               index.get("tuning", {}), toys, floor_pieces(index.get("pieces", {})))
 
 
-@lru_cache(maxsize=1)
-def toys() -> dict:
-    """The toys (pack-toys.json beside pack-toys.webp.b64, from an imported pack), or none."""
-    try:
-        index = json.loads(art_file("pack-toys.json").read_text())
-    except OSError:
-        return {}
-    sheet = _atlas("pack-toys")
-    return {name: (sheet.crop((r[0], r[1], r[0] + r[2], r[1] + r[3])), r[4], r[5]) for name, r in index.items()}
+def floor_pieces(entries: dict) -> tuple:
+    """A home's or a place's pieces as tools/build_house_pets.py writes them (name -> [x, y, w, h, depth key, one
+    hex bitmask per row]) -> ((depth key, x, y, mask, name), ...)."""
+    out = []
+    for name, (x, y, w, h, key, rows) in sorted(entries.items()):
+        bits = np.array([[(int(r, 16) >> (w - 1 - i)) & 1 for i in range(w)] for r in rows], np.uint8) * 255
+        out.append((key, x, y, Image.fromarray(bits, "L"), name))
+    return tuple(out)
+
+
+def at_size(pic: Image.Image, rows: int, cache: dict) -> Image.Image:
+    """``pic`` (a toy, her ball) ``rows`` tall, nearest neighbour, the same width-to-height; never bigger. The same
+    picture at the same height is always the same image (``cache``), so nothing flickers."""
+    if rows >= pic.height:
+        return pic
+    key = ("toy", id(pic), rows)
+    if key not in cache:
+        cache[key] = pic.resize((max(1, round(pic.width * rows / pic.height)), max(1, rows)), Image.Resampling.NEAREST)
+    return cache[key]
 
 
 def dressed(kind: str, frame: Frame, shift: int, pieces: list) -> Frame:
@@ -208,44 +194,14 @@ def face(kind: str = "cat", coat: str = "") -> Image.Image | None:
     return img.crop(box) if box else img
 
 
-# The source animations don't share a floor line: lying poses floated 1-2 px, the tall standing
-# poses sank 2 px and the walk hopped 3 px. Every frame is set so its lowest pixel sits one row
-# above the feet point (the standing pose's convention), except the walk's two mid-stride
-# frames, which keep a 1 px lift so the gait still has a little bounce.
-FLOOR = -1
-LIFT = {"walk_left": {2: -2, 6: -2}, "walk_right": {2: -2, 6: -2}}
+FLOOR = -1   # every frame is set so its lowest pixel sits one row above the feet point
 
 
-def grounded(tag: str, i: int, frame: Frame, lift: dict = LIFT) -> Frame:
+def grounded(frame: Frame) -> Frame:
     box = frame.image.getchannel("A").getbbox()
     if box is None:
         return frame
-    lowest = box[3] - 1  # last opaque row inside the image
-    return Frame(frame.image, frame.dx, lift.get(tag, {}).get(i, FLOOR) - lowest, frame.ms)
-
-
-def empty_bowl(room: Image.Image) -> Image.Image:
-    img = room.copy()
-    px = img.load()
-    for y in range(9, 12):
-        for x in range(57, 62):
-            r, g, b = px[x, y]
-            if (r, g, b) != (0x75, 0x64, 0x64) and r < 0xA0:
-                px[x, y] = (0x5A, 0x48, 0x48)
-    return img
-
-
-def night(room: Image.Image) -> Image.Image:
-    img = room.copy()
-    px = img.load()
-    for y in range(H):
-        for x in range(W):
-            r, g, b = px[x, y]
-            lum = (r * 3 + g * 6 + b) / 10
-            bedlight = max(0.0, 1 - math.hypot(x - 16, (y - 20) * 1.6) / 22)
-            k = 0.16 + 0.22 * bedlight
-            px[x, y] = (int(lum * k * 0.75), int(lum * k * 0.85), int(lum * k * 1.25 + 6))
-    return img
+    return Frame(frame.image, frame.dx, FLOOR - (box[3] - 1), frame.ms)
 
 
 def shrunk(frame: Frame, s: float) -> Frame:
@@ -285,24 +241,11 @@ def lit_night(room: Image.Image, light: dict) -> Image.Image:
     return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), "RGB")
 
 
-def forget() -> None:
-    """Drop every cached atlas and frame (a pack was just imported)."""
-    for f in (_index, _atlas, sheet, load, toys):
-        f.cache_clear()
-    from . import places
-    places.refresh()
-
-
 def missing(kind: str = "cat") -> bool:
-    """No art for ``kind`` on this Matrix (a public build before its owner imports a pack)."""
+    """No art for ``kind`` on this Matrix (a checkout with resources/pet missing)."""
     return not art_file(f"{kind}.json").exists()
 
 
 def no_art(width: int, height: int, fonts) -> Image.Image:
-    """What a Pet screen shows when there's no art yet: where to get some."""
-    img = Image.new("RGB", (width, height))
-    small = fonts("tom-thumb")
-    for i, (line, colour) in enumerate((("IMPORT YOUR", (255, 181, 71)), ("PET PACK IN", (230, 230, 230)),
-                                        ("SETTINGS >", (230, 230, 230)), ("PET", (230, 230, 230)))):
-        small.draw(img, max(0, (width - small.width(line)) // 2), 7 + i * 7, line, colour)
-    return img
+    """What a Pet screen shows without its art: a blank screen."""
+    return Image.new("RGB", (width, height))

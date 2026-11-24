@@ -19,7 +19,7 @@ from functools import lru_cache
 
 import numpy as np
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 W, H = 64, 32
 
@@ -81,6 +81,12 @@ class Place:
     def night(self):
         from .art import lit_night
         return lit_night(_picture(self.key, "night"), self.light)
+
+    @property
+    def pieces(self) -> tuple:
+        """What stands on its floor: (depth key, x, y, mask, name) (art.floor_pieces)."""
+        from .art import floor_pieces
+        return floor_pieces(_sheet()[0][self.key].get("pieces", {}))
 
     def back(self, img, t, room):
         pass
@@ -276,14 +282,14 @@ PLACES = {"garden": Garden(), "beach": Beach(), "snow": Snow(), "space": Space()
           "tatami": Tatami(), "forest": Forest(), "moon": Moon()}
 from . import rooms as _rooms   # noqa: E402  (it uses the helpers above)
 
-BIG = _rooms.ROOMS   # bigger rooms furnished from the pet pack's props: offered where that art is
-CHOICES = ["house", *PLACES, *_rooms.available()]
+BIG = _rooms.ROOMS   # the bigger rooms (rooms.py)
+CHOICES = ["house", *PLACES, *BIG]
 LABELS = {"house": "Home", **{k: v.name for k, v in PLACES.items()}, **{k: v.label for k, v in BIG.items()}}
 
 
 def get(place: str):
-    """The place by its setting (None: the house, or a bigger room this Matrix has no art for)."""
-    return PLACES.get(place) or (BIG.get(place) if place in CHOICES else None)
+    """The place by its setting (None: the house)."""
+    return PLACES.get(place) or BIG.get(place)
 
 
 @lru_cache(maxsize=None)
@@ -293,10 +299,3 @@ def rooms(place: str) -> tuple:
         return _rooms.images(place)
     p = PLACES[place]
     return p.day(True), p.day(False), p.night()
-
-
-def refresh() -> None:
-    """A pet pack was just imported: offer the bigger rooms it brought."""
-    _rooms.forget()
-    rooms.cache_clear()
-    CHOICES[:] = ["house", *PLACES, *_rooms.available()]
