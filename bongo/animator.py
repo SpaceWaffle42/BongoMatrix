@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageSequence, UnidentifiedImageError
 
-from bongo import media
+from bongo import durable, media
 
 MAX_FRAMES = 300
 MAX_SIDE = 128                    # a canvas is 1 to 128 pixels each way
@@ -401,7 +401,7 @@ def _write(text: str, target: Path) -> None:
             out.flush()
             os.fsync(out.fileno())   # whole on the card before it takes the old one's place: a pulled plug loses nothing
         os.chmod(tmp, 0o644)
-        os.replace(tmp, target)
+        durable.replace(tmp, target)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)

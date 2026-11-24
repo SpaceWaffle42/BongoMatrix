@@ -30,6 +30,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+from bongo import durable
+
 log = logging.getLogger("bongo.net")
 
 SETUP_AFTER = 5 * 60     # trying saved networks this long before setup opens
@@ -142,19 +144,20 @@ def current_country(run=subprocess.run) -> str | None:
 
 def apply_country(code: str, run=subprocess.run) -> bool:
     """Set the Wi-Fi country (the radio's legal channels; Raspberry Pi OS keeps Wi-Fi switched off
-    until one is set). ``raspi-config`` also unblocks the radio; ``iw`` elsewhere. Root only."""
+    until one is set) with ``iw``, for as long as this boot lasts: the display sets it again at every start
+    from the config, and ``unblock_radio`` switches the radio on. Never ``raspi-config``: on Bookworm it
+    also rewrites cmdline.txt on the boot partition, and a power cut there can leave a Pi that won't boot
+    (the image puts a default country in cmdline.txt when it's built). Root only."""
     from bongo.netname import can_manage_system
     code = (code or "").upper()
-    if len(code) != 2 or not code.isalpha() or not can_manage_system():
+    if len(code) != 2 or not code.isalpha() or not can_manage_system() or not shutil.which("iw"):
         return False
-    for cmd in (["raspi-config", "nonint", "do_wifi_country", code], ["iw", "reg", "set", code]):
-        if shutil.which(cmd[0]):
-            try:
-                run(cmd, check=True, capture_output=True, timeout=30)
-                return True
-            except (OSError, subprocess.SubprocessError) as error:
-                log.warning("couldn't set the Wi-Fi country to %s: %s", code, error)
-    return False
+    try:
+        run(["iw", "reg", "set", code], check=True, capture_output=True, timeout=30)
+        return True
+    except (OSError, subprocess.SubprocessError) as error:
+        log.warning("couldn't set the Wi-Fi country to %s: %s", code, error)
+        return False
 
 
 def unblock_radio(run=subprocess.run) -> None:
@@ -205,7 +208,7 @@ def captive_rule(path: str = CAPTIVE) -> bool:
         if not target.parent.is_dir():
             return False
         if not target.exists() or target.read_text() != rule:
-            target.write_text(rule)
+            durable.write_text(target, rule)
         return True
     except OSError:
         return False
@@ -224,7 +227,7 @@ def wifi_awake(path: str = AWAKE, run=subprocess.run, device: str = "wlan0") -> 
         if not target.parent.is_dir():
             return False
         if not target.exists() or target.read_text() != rule:
-            target.write_text(rule)    # (NetworkManager reads it when it next joins a network)
+            durable.write_text(target, rule)    # (NetworkManager reads it when it next joins a network)
     except OSError:
         return False
     if shutil.which("iw"):             # the network it's on now, without dropping it

@@ -31,6 +31,8 @@ from pathlib import Path
 
 from PIL import Image, ImageSequence
 
+from bongo import durable
+
 REPO = Path(__file__).resolve().parents[1]
 BUILT_IN = REPO / "resources" / "media" / "built-in"
 # data/ is the one folder the systemd service may write to (ReadWritePaths), so uploads live there
@@ -286,8 +288,8 @@ def save_upload(filename: str, stream) -> str:
         target, n = UPLOADED / name, 2
         while target.exists():  # never overwrite: cat.gif, cat-2.gif, ...
             target, n = UPLOADED / f"{Path(name).stem}-{n}{suffix}", n + 1
-        os.replace(tmp, target)
-        os.chmod(target, 0o644)
+        os.chmod(tmp, 0o644)
+        durable.replace(tmp, target)   # on the card whole before the upload is reported done
         return f"uploaded/{target.name}"
     finally:
         if os.path.exists(tmp):

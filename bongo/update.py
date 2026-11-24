@@ -398,18 +398,36 @@ def report(state: str, message: str, data: Path = None, **extra) -> dict:
 
 
 def _write(path: Path, what: dict) -> None:
-    """Put a small file in place whole. Each writer has a temporary file of its own: the daily look, Check for
+    """Put a small file in place whole, and on the card for good: after a power cut the status file is all the
+    updater has to go on (``unfinished``). Each writer has a temporary file of its own: the daily look, Check for
     updates and the updater can write at the same moment, and with one shared name the second found it gone."""
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=".tmp")
     try:
         with os.fdopen(handle, "w") as file:
             file.write(json.dumps(what))
+            file.flush()
+            os.fsync(file.fileno())
         os.chmod(tmp, 0o644)
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+    _sync_folder(path.parent)
+
+
+def _sync_folder(folder: Path) -> None:
+    """Flush the rename to the card too (bongo/durable.py does the same; the updater uses only Python's own library)."""
+    try:
+        fd = os.open(folder, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def status(data: Path = None) -> dict | None:

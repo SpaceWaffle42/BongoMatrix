@@ -34,6 +34,8 @@ import urllib.request
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from bongo import durable
+
 DATA = Path(__file__).resolve().parents[1] / "data"
 FILE = Path(os.environ.get("BONGO_CALENDARS", DATA / "calendars.json"))
 CACHE = Path(os.environ.get("BONGO_CALENDAR_CACHE", DATA / "calendar-cache.json"))
@@ -78,7 +80,7 @@ def _private_write(path: Path, text: str) -> None:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(text)
-    tmp.replace(path)
+    durable.replace(tmp, path)
 
 
 # -- the saved list (with the links) ----------------------------------------------------------------

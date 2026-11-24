@@ -24,6 +24,8 @@ from pathlib import Path
 
 from PIL import Image
 
+from bongo import durable
+
 MAX_DEVICES = 8
 PIN_SECONDS = 120
 PIN_MOST = 300                       # one showing, however many times it is asked for again
@@ -67,7 +69,7 @@ class Pairing:
         with os.fdopen(fd, "w") as f:
             json.dump(devices, f, indent=2)
         os.chmod(tmp, 0o600)
-        os.replace(tmp, self.path)
+        durable.replace(tmp, self.path)
 
     # -- the flow ------------------------------------------------------------------------
     def show_pin(self, paired: bool = True) -> float:

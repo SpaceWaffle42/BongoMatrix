@@ -37,6 +37,8 @@ import zipfile
 import zlib
 from pathlib import Path
 
+from bongo import durable
+
 log = logging.getLogger("bongo.addons")
 
 DATA = Path(os.environ.get("BONGO_ADDONS", Path(__file__).resolve().parents[1] / "data"))
@@ -104,7 +106,7 @@ def save_state(state: dict) -> None:
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(state, f, indent=1)
-        os.replace(tmp, path)
+        durable.replace(tmp, path)
     except OSError:   # (a full card: nothing half-written is left behind)
         try:
             os.unlink(tmp)

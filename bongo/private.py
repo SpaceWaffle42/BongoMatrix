@@ -16,6 +16,8 @@ import threading
 import urllib.parse
 from pathlib import Path
 
+from bongo import durable
+
 SECRETS = Path(os.environ.get("BONGO_SECRETS", Path(__file__).resolve().parents[1] / "data" / "secrets.json"))
 MOST_SECRET = 500          # characters in one secret: keys and tokens are far shorter
 _lock = threading.Lock()
@@ -33,7 +35,10 @@ def write(path: Path, text: str) -> None:
         try:
             with os.fdopen(fd, "w") as out:
                 out.write(text)
+                out.flush()
+                os.fsync(out.fileno())   # through the file it made: no other open of a secret file
             os.replace(temp, path)
+            durable.sync_folder(path.parent)
         except BaseException:
             temp.unlink(missing_ok=True)
             raise

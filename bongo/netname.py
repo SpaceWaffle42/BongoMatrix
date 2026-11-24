@@ -27,6 +27,8 @@ from xml.sax.saxutils import escape
 
 from PIL import Image
 
+from bongo import durable
+
 log = logging.getLogger("bongo.net")
 
 SHOW_SECONDS = 10
@@ -115,7 +117,7 @@ def _set_system_name(host: str, run, hosts: Path) -> bool:
         run(["hostnamectl", "set-hostname", host], check=True, capture_output=True, timeout=20)
         text = hosts.read_text() if hosts.exists() else ""
         lines = [ln for ln in text.splitlines() if not ln.startswith("127.0.1.1")] + [f"127.0.1.1\t{host}"]
-        hosts.write_text("\n".join(lines) + "\n")
+        durable.write_text(hosts, "\n".join(lines) + "\n")   # whole: a cut mid-write could lose localhost
         log.info("network name is now %s.local", host)
         return True
     except (OSError, subprocess.SubprocessError) as error:
@@ -136,7 +138,7 @@ def announce(name: str, port: int, version: str, ident: str, folder: Path = AVAH
            + '  </service>\n</service-group>\n')
     path = folder / "bongo.service"
     if not path.exists() or path.read_text() != xml:
-        path.write_text(xml)
+        durable.write_text(path, xml)
     return True
 
 
