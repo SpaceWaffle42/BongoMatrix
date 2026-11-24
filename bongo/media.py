@@ -31,12 +31,12 @@ from pathlib import Path
 
 from PIL import Image, ImageSequence
 
-from bongo import durable
+from bongo import durable, paths
 
 REPO = Path(__file__).resolve().parents[1]
 BUILT_IN = REPO / "resources" / "media" / "built-in"
 # data/ is the one folder the systemd service may write to (ReadWritePaths), so uploads live there
-UPLOADED = Path(os.environ.get("BONGO_UPLOADS", REPO / "data" / "uploads"))
+UPLOADED = Path(os.environ.get("BONGO_UPLOADS", paths.DATA / "uploads"))
 OLD_UPLOADED = REPO / "resources" / "media" / "uploaded"  # before 11 Nov 2026
 
 IMAGES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}

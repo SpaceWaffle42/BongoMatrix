@@ -26,6 +26,7 @@ import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]       # the Matrix's folder (the bongo package, resources, venv)
+from bongo.paths import DATA as MATRIX_DATA      # noqa: E402  (its data: settings, sign-ins; elsewhere with BONGO_DATA)
 ENFORCED = False                                 # in the child: set once it is shut in
 
 CLONE_NEWNS, CLONE_NEWNET, CLONE_NEWPID = 0x00020000, 0x40000000, 0x20000000
@@ -193,7 +194,7 @@ def _views(spec: dict) -> list[tuple[str, str, bool]]:
 
 def _hidden(spec: dict) -> list[str]:
     """Folders emptied in a child's view (anything kept is put back by ``_views``)."""
-    paths = ["/home", "/root", "/etc/bongo", "/var/lib/bongo", spec["root"], str(Path(spec["data"]).parent),
+    paths = ["/home", "/root", "/etc/bongo", "/var/lib/bongo", spec["root"], str(MATRIX_DATA), str(Path(spec["data"]).parent),
              "/run", "/var/run", "/var/lib/dbus",           # the host's sockets (D-Bus, journald...): none reachable
              "/tmp", "/var/tmp", "/dev/shm", "/run/lock"]  # shared places to write: each child gets empty ones
     out = []

@@ -13,9 +13,9 @@ import re
 import threading
 from pathlib import Path
 
-from bongo import private
+from bongo import paths, private
 
-FILE = Path(os.environ.get("BONGO_OPENWEATHER", Path(__file__).resolve().parents[3] / "data" / "openweather.json"))
+FILE = Path(os.environ.get("BONGO_OPENWEATHER", paths.DATA / "openweather.json"))
 _lock = threading.Lock()
 _read: tuple = (None, "")   # (the file's mtime when last read, the key in it)
 

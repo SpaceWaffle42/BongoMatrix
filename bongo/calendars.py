@@ -34,9 +34,9 @@ import urllib.request
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from bongo import durable
+from bongo import durable, paths
 
-DATA = Path(__file__).resolve().parents[1] / "data"
+DATA = paths.DATA
 FILE = Path(os.environ.get("BONGO_CALENDARS", DATA / "calendars.json"))
 CACHE = Path(os.environ.get("BONGO_CALENDAR_CACHE", DATA / "calendar-cache.json"))
 EVERY = 15 * 60            # seconds between fetches of a calendar

@@ -16,9 +16,9 @@ import threading
 import urllib.parse
 from pathlib import Path
 
-from bongo import durable
+from bongo import durable, paths
 
-SECRETS = Path(os.environ.get("BONGO_SECRETS", Path(__file__).resolve().parents[1] / "data" / "secrets.json"))
+SECRETS = Path(os.environ.get("BONGO_SECRETS", paths.DATA / "secrets.json"))
 MOST_SECRET = 500          # characters in one secret: keys and tokens are far shorter
 _lock = threading.Lock()
 _secrets_lock = threading.RLock()

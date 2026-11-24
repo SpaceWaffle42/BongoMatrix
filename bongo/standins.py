@@ -25,9 +25,9 @@ import threading
 import urllib.parse
 from pathlib import Path
 
-from bongo import private
+from bongo import paths, private
 
-SALT = Path(os.environ.get("BONGO_STAND_INS", Path(__file__).resolve().parents[1] / "data" / "stand-ins.key"))
+SALT = Path(os.environ.get("BONGO_STAND_INS", paths.DATA / "stand-ins.key"))
 STAND_IN = re.compile(r"\(saved:[0-9a-f]{20}\)")
 _lock = threading.Lock()
 _salt: list = []   # this Matrix's own (see ``_salted``)

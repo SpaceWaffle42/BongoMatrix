@@ -35,7 +35,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from bongo import private
+from bongo import paths, private
 
 log = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ SCOPES = "user-read-currently-playing user-read-playback-state"
 AUTH = "https://accounts.spotify.com/authorize"
 TOKEN = "https://accounts.spotify.com/api/token"
 PLAYING = "https://api.spotify.com/v1/me/player/currently-playing"
-FILE = Path(os.environ.get("BONGO_SPOTIFY", Path(__file__).resolve().parents[3] / "data" / "spotify.json"))
+FILE = Path(os.environ.get("BONGO_SPOTIFY", paths.DATA / "spotify.json"))
 POLL = 5.0                      # seconds between "what's playing?" checks while a screen asks
 _lock = threading.Lock()
 _pending: dict[str, str] = {}   # sign-in in progress: state -> PKCE verifier (and client id)

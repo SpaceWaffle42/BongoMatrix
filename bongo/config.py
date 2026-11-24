@@ -11,13 +11,13 @@ import tempfile
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from bongo import daylight, durable, media, pets
+from bongo import daylight, durable, media, paths, pets
 from bongo.module import Context, Module
 from bongo.player import Entry
 from bongo.safe_area import SafeArea
 from bongo.schedule import screen_problems
 
-DEFAULT_PATH = Path("data/config.json")
+DEFAULT_PATH = paths.DATA / "config.json"
 
 DEFAULTS = {
     "timezone": None,

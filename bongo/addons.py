@@ -37,11 +37,11 @@ import zipfile
 import zlib
 from pathlib import Path
 
-from bongo import durable
+from bongo import durable, paths
 
 log = logging.getLogger("bongo.addons")
 
-DATA = Path(os.environ.get("BONGO_ADDONS", Path(__file__).resolve().parents[1] / "data"))
+DATA = Path(os.environ.get("BONGO_ADDONS", paths.DATA))
 MANIFEST = "bongo-module.json"
 MOST_DOWNLOAD = 5 << 20          # a .zip or GitHub download
 MOST_UNPACKED = 20 << 20

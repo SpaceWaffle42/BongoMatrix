@@ -39,7 +39,7 @@ import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-DATA = REPO / "data"
+DATA = Path(os.environ.get("BONGO_DATA") or REPO / "data")   # (as bongo/paths.py: this file uses only Python's own library)
 DEFAULT_URL = "http://gitlab.home.lan/matrix_display/bongo_matrix.git"
 DEFAULT_BRANCH = "prod_device"   # only the files the display needs (see tools/prod_tree.py)
 SERVICE = "bongo-matrix"
@@ -570,7 +570,7 @@ def pip_install(requirements: Path) -> None:
 def apply(config: dict, repo: Path = REPO, data: Path = None, restart=restart_service, health=None,
           pip=pip_install) -> dict:
     """Update the checkout to the configured branch, restart, and roll back if it won't start."""
-    data = data or repo / "data"
+    data = data or (DATA if repo == REPO else repo / "data")
     url, branch = source(config)
     port = (config.get("web") or {}).get("port", 5000)
     if health is None:
