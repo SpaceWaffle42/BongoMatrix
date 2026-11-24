@@ -1,6 +1,6 @@
 """Bigger places for the pet: medium (96x48) and large (128x64) rooms she walks about in while the
 view follows her (styles.window). The floors and walls are drawn here; the furniture and plants are
-Last Tick's props (``props`` and ``plants`` atlases in resources/pet, built by bongo/petpack.py), so
+Last Tick's props (``pack-props`` and ``pack-plants`` atlases in resources/pet, built by bongo/petpack.py), so
 like the pet herself they are only on a Matrix that has that art: without it the rooms aren't offered.
 
 A room is the same thing to the scene engine as a place in places.py (day, night, back, front, zzz),
@@ -31,7 +31,7 @@ SIZE_NAMES = {MEDIUM: "medium", LARGE: "large"}
 def pieces() -> dict:
     """Every prop and plant on this Matrix by name (none without the art)."""
     out = {}
-    for sheet in ("props", "plants"):
+    for sheet in ("pack-props", "pack-plants"):
         try:
             index = json.loads(art_file(f"{sheet}.json").read_text())
             atlas = art._atlas(sheet)
@@ -184,7 +184,8 @@ class Room:
         bed, bowl = got[self.bed[0]], got[self.bowl[0]]
         feet = (self.bed[1] + bed.width // 2, self.bed[2] - 2)                   # curled up on the cushion
         cx, cy = self.bowl[1] + bowl.width // 2, self.bowl[2] - bowl.height // 2
-        return Stage(w, h, *self.patch, bed=feet, bowl=(cx - 13, cy + 7), beg=(cx - 15, cy + 12))
+        return Stage(w, h, *self.patch, bed=feet, bowl=(cx - 13, cy + 7), beg=(cx - 15, cy + 12),
+                     front=False)   # its own floor: the furniture's layout, as drawn
 
     def floor(self, img):
         raise NotImplementedError

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import bisect
 import hashlib
+import math
 
 from PIL import Image, ImageDraw
 
@@ -12,7 +13,7 @@ from .art import H, W, load, missing, no_art
 from bongo.pets import wearing
 
 from . import places, roam
-from .scenes import BANNER_SLIDE_MS, HOUSE, MODES, STRIDE, TAG_RISE_MS, record_loop
+from .scenes import BANNER_SLIDE_MS, MODES, STRIDE, TAG_RISE_MS, record_loop, stage_for
 
 # The engine's 3x5 font: tiny, and the same on every panel.
 FONT = {
@@ -39,11 +40,15 @@ def text(draw, x, y, s, colour):
     return x
 
 
-def overlay(draw, item, t, shot, life=float("inf"), view=(0, 0, W, H)):
+CAT_HEAD = 18   # the sitting cat's height the overlays were placed for; a kind's tuning "head" moves them down
+
+
+def overlay(draw, item, t, shot, life=float("inf"), view=(0, 0, W, H), head=CAT_HEAD):
     """Speech bubbles, Zs, banners and the name tag, drawn over the scene ``t`` ms after the item
     appeared; ``life``: how long it stays, so each comes and goes gently (no Z is ever left mid-air).
     ``view`` is the part of the room on screen (x, y, width, height): they are kept inside it."""
     kind, cx, cy = item[0], int(shot.cat[0]), int(shot.cat[1])
+    cy += max(0, CAT_HEAD - head)   # a smaller pet: Zs, bubble, tag and grumble start lower, nearer her head
     vx, vy, vw, vh = view
     if kind == "zzz":
         for k in range(2):
@@ -79,8 +84,9 @@ def overlay(draw, item, t, shot, life=float("inf"), view=(0, 0, W, H)):
         text(draw, x, y + 1, name, (255, 227, 179))
     elif kind == "dust" and shot.moving and int(t / 40) % 2 == 0:
         bx = cx - 11 * shot.moving
-        draw.point((bx, cy - 1), fill=(240, 220, 190))
-        draw.point((bx - 2 * shot.moving, cy - 3), fill=(240, 220, 190))
+        fy = int(shot.cat[1])                         # dust stays at her feet
+        draw.point((bx, fy - 1), fill=(240, 220, 190))
+        draw.point((bx - 2 * shot.moving, fy - 3), fill=(240, 220, 190))
     elif kind == "grumble" and (t // 330) % 2 == 0:
         for k in range(5):
             draw.point((cx - 2 + k, max(vy, cy - 24) + (k + int(t / 110)) % 3), fill=(90, 90, 110))
@@ -290,7 +296,9 @@ class _Scene(Style):
             return
         self.art = load(self.ctx.pet.kind, self.ctx.pet.coat, wearing(self.ctx.pet, self.ctx.now().date()))
         self.place = places.get(self.settings["place"])
-        self.stage = getattr(self.place, "stage", HOUSE)   # a bigger room has its own size, bed, bowl and floor
+        # a bigger room has its own size, bed, bowl and floor; the house is her own home (the pack kinds' room
+        # keeps its old layout) and the places all have the front-floor one
+        self.stage = stage_for(self.art, self.place)
         day, empty, night = places.rooms(self.settings["place"]) if self.place else (self.art.room, self.art.empty, self.art.night)
         self.rooms = {"day": day, "empty": empty, "night": night}
         self.timeline = record_loop(self.art, self.modes(), self.ctx.pet.name, self.stage)   # seamless: scenes link up
@@ -326,15 +334,19 @@ class _Scene(Style):
         img = self.room(shot.room, clock).convert("RGBA")
         if shot.fade:   # the room changing: lights going out or up, the bowl filling or emptying
             img = Image.blend(self.room(shot.fade[0], clock).convert("RGBA"), img, shot.fade[1])
-        big = self.stage is not HOUSE
+        big = (self.stage.w, self.stage.h) != (W, H)
         empty = img.copy() if big else None   # the room without her: what's in front of her is drawn back from it
+        ball_on_top = None
         if shot.ball:
             ball = art.ball
             if shot.fade and "night" in (shot.fade[0], shot.room):   # dims with the light
                 lit = 1 - shot.fade[1] if shot.room == "night" else shot.fade[1]
                 ball = ball.copy()
                 ball.putalpha(ball.getchannel("A").point(lambda a: int(a * lit)))
-            img.alpha_composite(ball, (int(shot.ball[0]) - 4, int(shot.ball[1]) - 4))
+            if self.stage.front and shot.cat[1] < shot.ball[1]:   # she's further back up the floor: it's in front
+                ball_on_top = ball
+            else:
+                img.alpha_composite(ball, (int(shot.ball[0]) - 4, int(shot.ball[1]) - 4))
         # a bee flies in front of her; a toy on the floor is behind her, except beside a sitting cat,
         # where it would hide under her tail
         flying = shot.toy and (shot.toy[0] == "bee" or shot.tag in ("meow_sit", "wash_sit"))
@@ -345,10 +357,17 @@ class _Scene(Style):
                 if thing:
                     self.place.over(img, empty, (thing[0], thing[1] - 3))
         frame = art.animations[shot.tag][shot.index]
-        x, y = int(round(shot.cat[0])) + frame.dx, int(round(shot.cat[1])) + frame.dy
+        depth = self.stage.scale(shot.cat[1])
+        if depth < 1:   # further back up the floor, smaller (whole rows of height, through her feet)
+            frame = art.at_depth(frame, self.stage.rows(art.ref_height, shot.cat[1]))
+        # (rounded half up, the one place her position is rounded: never banker's rounding, which would
+        # alternate on half pixels)
+        x, y = math.floor(shot.cat[0] + 0.5) + frame.dx, math.floor(shot.cat[1] + 0.5) + frame.dy
         layer = Image.new("RGBA", img.size)
         layer.paste(frame.image, (x, y), frame.image)
         img.alpha_composite(layer)
+        if ball_on_top is not None:
+            img.alpha_composite(ball_on_top, (int(shot.ball[0]) - 4, int(shot.ball[1]) - 4))
         if big:
             self.place.over(img, empty, shot.cat, shot.perch)
         if flying:
@@ -374,7 +393,7 @@ class _Scene(Style):
         if big:   # the room is bigger than the screen: the camera follows her (Camera)
             thing = None
             if self.timeline[k][1] in PLAY:
-                for it in (shot.ball, shot.toy and shot.toy[0] == "mouse" and shot.toy[1:3]):
+                for it in (shot.ball, shot.toy and shot.toy[0] != "bee" and shot.toy[1:3]):
                     if it and abs(it[1] - shot.cat[1]) < 16 and 0 <= it[0] < img.width:
                         thing = (round(it[0]), round(it[1]))
                         break
@@ -393,7 +412,7 @@ class _Scene(Style):
                 if shot.fade and "night" in (shot.fade[0], shot.room):
                     dark = shot.fade[1] if shot.room == "night" else 1 - shot.fade[1]
                 item = ("zzz", tuple(round(a + (b - a) * dark) for a, b in zip(self.place.zzz, NIGHT_ZZZ)))
-            overlay(draw, item, t - began, shot, ended - began, view)
+            overlay(draw, item, t - began, shot, ended - began, view, round(art.tuning.get("head", CAT_HEAD) * depth))
         if big:
             x0, y0 = self.last_view
             return img.convert("RGB").crop((x0, y0, x0 + w, y0 + h))

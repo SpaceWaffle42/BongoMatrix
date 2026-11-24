@@ -37,6 +37,10 @@ class PackError(ValueError):
 
 
 ANCHOR = (16, 25)  # the cat's feet inside a 32 px cell
+# The packs' art goes under its own names, so it never clashes with our own built-in cat and bunny
+# (tools/build_house_pets.py) and a public build can leave exactly these files out (tools/prod_tree.py).
+CAT, BUNNY_KIND = "packcat", "packbunny"
+TOYS_SHEET, PROPS_SHEET, PLANTS_SHEET = "pack-toys", "pack-props", "pack-plants"
 DEFAULT = "10"     # Mochi's coat, and the one whose GIFs give the timings
 # the animations the Pet module plays (bongo/modules/pet/scenes.py, plus Wander's walks); the
 # others in the pack are left out to keep the atlases small. Add a tag here when a scene uses it.
@@ -272,7 +276,7 @@ TOYS = {"mouse": "mouse_1.png", "carrot_1": "carrot_1.png", "carrot_2": "carrot_
 
 
 def toys(folder: Path, out: Path) -> str:
-    """``toys.json`` + ``toys.webp.b64``: each toy trimmed, placed by the middle of its bottom edge.
+    """``pack-toys.json`` + ``pack-toys.webp.b64``: each toy trimmed, placed by the middle of its bottom edge.
     (Bee and wings share one box, so the wings stay on the bee.)"""
     imgs = {name: Image.open(folder / file).convert("RGBA") for name, file in TOYS.items()}
     boxes = {name: img.getbbox() for name, img in imgs.items()}
@@ -289,8 +293,8 @@ def toys(folder: Path, out: Path) -> str:
         x += b[2] - b[0]
     buf = io.BytesIO()
     atlas.save(buf, "WEBP", lossless=True, quality=100, method=6)
-    (out / "toys.webp.b64").write_text(base64.b64encode(buf.getvalue()).decode())
-    (out / "toys.json").write_text(json.dumps(index, separators=(",", ":")) + "\n")
+    (out / f"{TOYS_SHEET}.webp.b64").write_text(base64.b64encode(buf.getvalue()).decode())
+    (out / f"{TOYS_SHEET}.json").write_text(json.dumps(index, separators=(",", ":")) + "\n")
     return f"toys: {len(index)}"
 
 
@@ -360,7 +364,7 @@ def _sheet(out: Path, name: str, imgs: dict) -> None:
 
 
 def props(folder: Path, out: Path) -> str:
-    """The kittens pack's ``extras/props`` folder -> ``props.json`` + ``props.webp.b64``."""
+    """The kittens pack's ``extras/props`` folder -> ``pack-props.json`` + ``pack-props.webp.b64``."""
     imgs = {}
     for name, (kind, *spec) in PROPS.items():
         if kind == "part":
@@ -376,17 +380,17 @@ def props(folder: Path, out: Path) -> str:
             full.alpha_composite(food)
             box = bowl.getbbox()
             imgs[name], imgs[name + "_full"] = bowl.crop(box), full.crop(box)
-    _sheet(out, "props", imgs)
+    _sheet(out, PROPS_SHEET, imgs)
     return f"furniture for the bigger places: {len(imgs)} pieces"
 
 
 def plants(folder: Path, out: Path) -> str:
-    """The nature pack's ``png`` folder -> ``plants.json`` + ``plants.webp.b64`` (half size)."""
+    """The nature pack's ``png`` folder -> ``pack-plants.json`` + ``pack-plants.webp.b64`` (half size)."""
     imgs = {}
     for name in PLANTS:
         small = half(Image.open(folder / f"{name}.png").convert("RGBA"))
         imgs[name] = small.crop(small.getbbox())
-    _sheet(out, "plants", imgs)
+    _sheet(out, PLANTS_SHEET, imgs)
     return f"plants for the garden places: {len(imgs)}"
 
 
@@ -411,7 +415,7 @@ def cats(sheets_folder: Path, out: Path, remastered: Path | None = None) -> list
     outfits = {name: np.asarray(Image.open(acc / path).convert("RGBA")) for name, path in have.items()}
     side = {name: np.asarray(Image.open(acc / path).convert("RGBA")) for name, path in HALO_ONLY.items()
             if (acc / path).exists()}
-    done = [pack(out, "cat", sheets, anims, DEFAULT, NAMES, (FACE, 14, 12), room, ball,
+    done = [pack(out, CAT, sheets, anims, DEFAULT, NAMES, (FACE, 14, 12), room, ball, tuning=CAT_TUNING,
                  outfits=outfits or None, outfit_side=side)]
     if (extras / "props" / "toys").is_dir():
         done.append(toys(extras / "props" / "toys", out))
@@ -456,7 +460,8 @@ BUNNY_NAMES = {
 
 # she is smaller than the cat: nearer the bowl, closer to the ball, and the ball rests out of her way
 BUNNY_TUNING = {"bowl": [-5, -2], "ball": [58, 28], "reach": 7, "zoomies": [1.7, 5.3], "toy": "carrot",
-                "swat": "yawn_sit", "swat_frames": [0, 1, 5, 6, 7, 8], "bee_lift": 3}
+                "swat": "yawn_sit", "swat_frames": [0, 1, 5, 6, 7, 8], "bee_lift": 3, "stage": "pack"}
+CAT_TUNING = {"stage": "pack"}   # the pack's room keeps its own layout (bowl on the shelf at the back)
 
 
 def bunnies(folder: Path, out: Path) -> list[str]:
@@ -465,8 +470,8 @@ def bunnies(folder: Path, out: Path) -> list[str]:
               if len(p.stem.split(" ")) > 1}
     if BUNNY_DEFAULT not in sheets:
         raise PackError(f"no Bunny {BUNNY_DEFAULT} sheet in {folder.name}")
-    return [pack(out, "bunny", sheets, BUNNY, BUNNY_DEFAULT, BUNNY_NAMES, ((0, 0), 13, 14), airborne=BUNNY_AIRBORNE,
-                 room_from="cat", tuning=BUNNY_TUNING)]
+    return [pack(out, BUNNY_KIND, sheets, BUNNY, BUNNY_DEFAULT, BUNNY_NAMES, ((0, 0), 13, 14), airborne=BUNNY_AIRBORNE,
+                 room_from=CAT, tuning=BUNNY_TUNING)]
 
 
 MAX_ZIP = 300 * 1024 * 1024        # bytes an uploaded pack may unpack to
@@ -519,7 +524,7 @@ def import_zip(upload: Path, out: Path) -> list[str]:
             raise PackError("no Last Tick kittens, bunny or nature pack found in that zip (looking for a "
                             "'cats_animations' folder with Cat 10, a bunny 'animation' folder, or the nature "
                             "pack's 'png' folder)")
-        if "bunny" in packs and "cat" not in packs and not (out / "cat.json").exists():
+        if "bunny" in packs and "cat" not in packs and not (out / f"{CAT}.json").exists():
             raise PackError("the bunny lives in the kittens pack's room: import the kittens pack first (or both together)")
         build = Path(tmp) / "build"
         made = []

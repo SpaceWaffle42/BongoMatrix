@@ -6,14 +6,20 @@ animations; every step is recorded as a Shot, and a style plays the shots by the
 from __future__ import annotations
 
 import math
+import dataclasses
 from dataclasses import dataclass, field
 
 from .art import H, W, Art
 
-BED = (16, 29)        # sitting, lying or curled-up cat lands on the cushion
-BOWL_SPOT = (50, 18)  # standing left of the bowl, facing right
-BEG_SPOT = (48, 23)   # below the bowl: room for the tall hind-legs pose
-CENTRE = (36, 26)
+# The front-floor layout every home and place has (Billy, 23 Nov: pets at the back looked huge): feet on
+# rows 25-30, the bed bottom-left, the floor bowl front right (x 52-61, rows 25-30), the ball's home in the
+# middle, furniture only on the back wall.
+BED = (14, 29)        # sitting, lying or curled-up pet lands in the bed (the flamingo sleeps standing here)
+BOWL_SPOT = (43, 30)  # left of the floor bowl, facing right (+ the kind's bowl offset)
+BEG_SPOT = (38, 29)   # up on her hind legs, in front of the back wall's things
+CENTRE = (36, 29)
+# The Last Tick room the pack's cat and bunny live in (bowl on the shelf at the back): their own layout.
+OLD_BED, OLD_BOWL_SPOT, OLD_BEG_SPOT, OLD_CENTRE = (16, 29), (50, 18), (48, 23), (36, 26)
 
 
 
@@ -29,6 +35,29 @@ class Stage:
     bed: tuple = BED
     bowl: tuple = BOWL_SPOT
     beg: tuple = BEG_SPOT
+    front: bool = True        # the front-floor layout (False: the pack room's, spots a few rows further back)
+    depth: bool = True        # she shrinks as she goes back up the floor (False: the pack room, drawn flat)
+
+    def scale(self, y) -> float:
+        """How big she is drawn with her feet on row ``y`` (Billy, 24 Nov; council 24 Nov: the two front rows,
+        where she sleeps, sits and begs, are both full size): 100% on rows 29-30 of a 64x32 room (the floor's
+        two front rows), shrinking from row 28 to 65% at row 17, and in between in proportion."""
+        if not self.depth:
+            return 1.0
+        full = self.h - 3                       # the back one of the two full-size front rows (29 in a 64x32 room)
+        return max(DEPTH_SMALL, min(1.0, 1 - (1 - DEPTH_SMALL) * (full - round(y)) / DEPTH_ROWS))
+
+    def rows(self, ref: int, y) -> int:
+        """Her height in whole rows at feet row ``y``: she shrinks one row at a time, never by a fraction."""
+        return max(4, round(ref * self.scale(y)))
+
+    @property
+    def centre(self):
+        return self.at(36, self.row(26, 29))
+
+    def row(self, old, new):
+        """A floor row in this layout: ``new`` on the front floor, ``old`` in the pack room or a bigger room."""
+        return new if self.front else old
 
     def at(self, x, y):
         """A spot on the house's floor -> the same spot on this room's patch of it."""
@@ -38,7 +67,7 @@ class Stage:
     def plea(self):
         """Where she asks for food: wherever she is in the house; in a bigger room, beside her empty bowl
         (it would be out of sight from the far side)."""
-        return self.at(40, 26) if (self.w, self.h) == (W, H) else self.bowl
+        return self.at(self.row(40, 36), self.row(26, 29)) if (self.w, self.h) == (W, H) else self.bowl
 
     @property
     def left(self):          # out of sight past the left wall
@@ -54,7 +83,28 @@ class Stage:
         return min(self.w + 8, max(x + 72, 72)) if side == 1 else max(-8, min(x - 72, self.w - 72))
 
 
+DEPTH_SMALL, DEPTH_ROWS = 0.65, 12   # depth scaling: 65% twelve rows behind the full-size front rows (row 17)
 HOUSE = Stage()
+PACK_HOUSE = Stage(bed=OLD_BED, bowl=OLD_BOWL_SPOT, beg=OLD_BEG_SPOT, front=False, depth=False)
+
+
+def is_pack(art) -> bool:
+    return art.tuning.get("stage") == "pack"
+
+
+def house_for(art) -> Stage:
+    """The house stage for a kind: the front-floor layout, unless it's a pack's animal (the pack room's)."""
+    return PACK_HOUSE if is_pack(art) else HOUSE
+
+
+def stage_for(art, place) -> Stage:
+    """Where she lives: her own home (``place`` None), a place (the front floor every place has) or a bigger
+    room (its own stage). A pack's animal is never scaled by depth: its art is drawn for one size."""
+    if place is None:
+        return house_for(art)
+    stage = getattr(place, "stage", None) or HOUSE
+    return dataclasses.replace(stage, depth=False) if is_pack(art) else stage
+
 
 WALKS = [(0, "walk_right"), (45, "walk_right_d"), (90, "walk_down"), (135, "walk_left_d"),
          (180, "walk_left"), (225, "walk_left_up"), (270, "walk_up"), (315, "walk_right_up")]
@@ -95,6 +145,22 @@ class Script:
     origin: tuple | None = None # where this scene starts when it starts afresh (the loop's first scene)
 
     @property
+    def bed(self):
+        """Her sleep spot: the stage's, nudged right just enough that her widest lying pose stays on screen."""
+        x, y = self.stage.bed
+        return (x + max(0, -(x + left_reach(self.art, LYING))), y)
+
+    def clear_of_bowl(self) -> bool:
+        """Staying where she is, would her poses there keep clear of the floor bowl (front floor, x 52-61)?"""
+        if not (self.stage.front and (self.stage.w, self.stage.h) == (W, H)) or self.cat[1] < 26:
+            return True
+        return self.cat[0] + right_reach(self.art, STILL_POSES) <= FRONT_BOWL_X
+
+    def fit_x(self, x, tags):
+        """``x``, moved just enough that her poses in ``tags`` stay inside the room."""
+        return min(max(x, -left_reach(self.art, tags)), self.stage.w - right_reach(self.art, tags))
+
+    @property
     def entering(self) -> bool:
         return self.enter is not None
 
@@ -108,7 +174,7 @@ class Script:
 
     @property
     def in_bed(self) -> bool:
-        bed = self.stage.bed
+        bed = self.bed
         return self.lying and math.hypot(self.cat[0] - bed[0], self.cat[1] - bed[1]) < 0.5
 
     def start(self, x, y, anywhere=False, room="day"):
@@ -124,7 +190,7 @@ class Script:
         if self.room == "night" and room != "night":
             self.fade_to(room)
         self.get_up()
-        if not (anywhere and on_screen(self.cat, self.stage.w)):
+        if not (anywhere and on_screen(self.cat, self.stage.w) and self.clear_of_bowl()):
             self.go(x, y)
         if self.room != room:
             self.fade_to(room)
@@ -157,7 +223,7 @@ class Script:
         if self.in_bed:
             return
         self.get_up()
-        self.go(*self.stage.bed)
+        self.go(*self.bed)
         self.play("sleep2_l")
 
     def fade_to(self, room):
@@ -245,17 +311,34 @@ class Script:
         if gait:   # the gait drives the main axis exactly (x for a side walk); the other follows in whole pixels
             sx, sy, tx, ty = round(sx), round(sy), round(x), round(y)
             run, done, i = max(abs(tx - sx), abs(ty - sy)), 0, 0
+            small = (self.stage.w, self.stage.h) == (W, H) and min(self.stage.scale(sy), self.stage.scale(ty)) < 1
             while done < run:
                 i += 1
-                done = min(run, done + gait[i % len(gait)])
-                self.cat = [sx + round((tx - sx) * done / run), sy + round((ty - sy) * done / run)]
+                s = self.stage.scale(sy + (ty - sy) * done / run)   # further back, smaller steps (depth)
+                step = gait[i % len(gait)] * s
+                if (self.stage.w, self.stage.h) != (W, H) and step:   # a bigger room's camera follows whole pixels:
+                    step = max(1, round(step))                         # whole-pixel steps there
+                done = min(run, done + step)
+                if run - done < 0.5:
+                    done = run                                        # (never a last sliver of a step on its own)
+                if small:   # any of the walk shrunk: kept exact all the way, rounded once where she's drawn (one
+                    #   rule for the whole walk, so she never reaches the spot early and treads on it)
+                    self.cat = [sx + (tx - sx) * done / run, sy + (ty - sy) * done / run]
+                else:
+                    self.cat = [sx + round((tx - sx) * done / run), sy + round((ty - sy) * done / run)]
+                    if self.cat == [tx, ty] and done < run and step:
+                        done = run                                    # there (a bigger room's whole-pixel steps)
                 self.shot(tag, i % len(anim), anim[i % len(anim)].ms / speed)
             last = i % len(anim)
             if tag in ("walk_right", "walk_left") and last in (2, 4, 6):   # never stop mid-hop or mid-pass:
                 self.shot(tag, last + 1, anim[last + 1].ms / speed)         # land in place, then hand off
             self.cat = [x, y]
         else:
-            steps = max(1, int(round(dist / (STRIDE[tag] * stride_mult))))
+            stride = STRIDE[tag] * stride_mult
+            steps = max(1, int(round(dist / stride)))
+            if self.stage.front and dist / steps > stride + 0.01:   # never more than a stride a step (the pack
+                #   room keeps its old pounce, which could round down)
+                steps += 1
             for i in range(1, steps + 1):
                 self.cat = [sx + dx * i / steps, sy + dy * i / steps]
                 self.shot(tag, i % len(anim), anim[i % len(anim)].ms / speed)
@@ -263,9 +346,37 @@ class Script:
 
 
 LYING = ("sleep1_l", "sleep2_l", "sleep3_l", "yawn_lie", "wash_lie", "meow_lie")
+
+
+FRONT_BOWL_X = 52   # the floor bowl's left edge: nothing but eating goes past it on the front rows
+STILL_POSES = ("meow_sit", "meow_sit2", "meow_stand", "hiss_r", "wash_sit", "scratch_r", "yawn_sit", "yawn_stand",
+               "on_hind_legs", "paw_right")
+
+
+def left_reach(art, tags) -> int:
+    """How far left of her feet her drawing goes (negative) in the widest frame of ``tags``."""
+    key = ("left", tuple(tags))
+    if key not in art.sized:
+        art.sized[key] = min(f.dx + f.image.getchannel("A").getbbox()[0] for t in tags if t in art.animations
+                             for f in art.animations[t])
+    return art.sized[key]
+
+
+def right_reach(art, tags) -> int:
+    key = ("right", tuple(tags))
+    if key not in art.sized:
+        art.sized[key] = max(f.dx + f.image.getchannel("A").getbbox()[2] for t in tags if t in art.animations
+                             for f in art.animations[t])
+    return art.sized[key]
 LOOPING = ("sleep1_l", "sleep2_l", "sleep3_l", "meow_sit", "meow_sit2")   # resting poses that can keep cycling
 FADE_MS = 900
-BALL_HOME = (58, 28)   # where the ball rests by the wall when nobody's playing (tuning "ball" moves it)
+BALL_HOME = (58, 28)   # the pack room's ball rests by the wall when nobody's playing (tuning "ball" moves it)
+FRONT_BALL = (32, 28)  # on the front floor: the middle, between the bed and the bowl (the toy's home)
+
+
+def ball_home(art, stage) -> tuple:
+    """Where her ball rests: the toy home on the front floor, else where her art says (or by the wall)."""
+    return stage.at(*FRONT_BALL) if stage.front else stage.at(*art.tuning.get("ball", BALL_HOME))
 
 
 def on_screen(cat, w=W) -> bool:
@@ -273,7 +384,7 @@ def on_screen(cat, w=W) -> bool:
 
 
 def idle(s, name):
-    s.start(*s.stage.at(*CENTRE), anywhere=True)
+    s.start(*s.stage.centre, anywhere=True)
     s.hold("meow_sit", 0, 1500)
     s.play("yawn_sit")
     s.hold("meow_sit", 0, 1200)
@@ -282,18 +393,18 @@ def idle(s, name):
 
 
 def eating(s, name):                       # (bed ->) bowl -> eat -> wash
-    s.start(*s.stage.bed, anywhere=True)
+    s.start(*s.bed, anywhere=True)
     if not s.entering:
         s.hold("meow_sit", 0, 800)
     bx, by = s.art.tuning.get("bowl", (0, 0))  # a smaller animal stands nearer the bowl
     s.go(s.stage.bowl[0] + bx, s.stage.bowl[1] + by)
     s.play("eat_right", loops=4)
-    s.go(s.stage.bowl[0] - 8, min(s.stage.bowl[1] + 7, s.stage.h - 4))   # a step back from the bowl
+    s.go(s.stage.bowl[0] - 8, s.stage.row(min(s.stage.bowl[1] + 7, s.stage.h - 4), s.stage.bowl[1]))   # a step back
     s.play("wash_sit")
 
 
 def washing(s, name):
-    s.start(*s.stage.at(40, 26), anywhere=True)
+    s.start(*s.stage.at(s.stage.row(40, 36), s.stage.row(26, 29)), anywhere=True)
     s.play("wash_sit", loops=3)
     s.hold("meow_sit", 0, 900)
 
@@ -301,10 +412,12 @@ def washing(s, name):
 def playing(s, name):                      # off the wall, chase it, bat it off the wall and back, home again
     reach = s.art.tuning.get("reach", 10)  # how far in front of her feet the ball sits when she bats it
     P = s.stage.at
-    home = P(*s.art.tuning.get("ball", BALL_HOME))
+    home = ball_home(s.art, s.stage)
     floor = home[1]
     if s.ball is None:
         s.ball = list(home)
+    if s.stage.front:
+        return _front_playing(s, reach, home)
 
     def roll(to, speed, brake=True):       # the ball rolls towards ``to`` (slowing to a stop there, if braking)
         while abs(s.ball[0] - to) > 0.25:
@@ -332,20 +445,47 @@ def playing(s, name):                      # off the wall, chase it, bat it off 
     s.hold("on_hind_legs", 2, 600)
 
 
+def _front_playing(s, reach, home):
+    """On the front floor the ball lives in the middle: she bats it right, follows, and bats it again; it
+    bounces off the bowl's rim and rolls back home past her; then up on her hind legs at the beg spot,
+    pleased. She stays left of the ball the whole time, so she never stands over the bowl."""
+    P, floor = s.stage.at, home[1]
+
+    def roll(to, speed):                   # the ball rolls towards ``to``, slowing to a stop there
+        while abs(s.ball[0] - to) > 0.25:
+            step = max(0.3, min(speed, abs(to - s.ball[0]) * 0.25))
+            s.ball[0] += step if to > s.ball[0] else -step
+            s.shot("paw_right" if to > s.ball[0] else "paw_left", 0, 60)
+        s.ball[0] = to
+
+    s.start(s.ball[0] - reach, floor)      # to wherever the ball lies
+    s.play("paw_right")
+    roll(P(38, 0)[0], 2.0)
+    s.go(P(38, 0)[0] - reach, floor)       # she follows it
+    s.play("paw_right")
+    roll(P(47, 0)[0], 2.4)                 # up to the bowl's rim...
+    roll(home[0], 1.4)                     # ...and back home, slower
+    s.ball = list(home)
+    s.go(*s.stage.beg)                     # away from the bowl, where there's room to stand up tall
+    s.play("on_hind_legs")
+    s.hold("on_hind_legs", 2, 600)
+
+
 def zoomies(s, name):
     """No run cycle in the art, so the real walk cycles played fast with a long stride."""
     P, left, right = s.stage.at, s.stage.left, s.stage.right
-    s.start(left, P(0, 26)[1])             # out of the room first...
+    R = s.stage.row
+    s.start(left, P(0, R(26, 27))[1])      # out of the room first...
     s.overlays.append(("dust",))
     speed, stride = s.art.tuning.get("zoomies", (3.0, 3.0))
     fast = dict(speed=speed, stride_mult=stride)
-    for x, y in (P(30, 26), P(50, 21), (right, P(0, 21)[1])):
+    for x, y in (P(30, R(26, 25)), P(50, R(21, 25)), (right, P(0, R(21, 25))[1])):   # (behind the bowl)
         s.walk_to(x, y, **fast)
-    s.cat = [right, P(0, 23)[1]]
-    for x, y in (P(46, 23), P(30, 28), (left, P(0, 28)[1])):
+    s.cat = [right, P(0, R(23, 25))[1]]   # (on the front floor: behind the bowl, then down past it)
+    for x, y in (P(R(46, 40), R(23, 25)), P(30, R(28, 30)), (left, P(0, R(28, 30))[1])):
         s.walk_to(x, y, **fast)
-    s.cat = [left, P(0, 24)[1]]
-    s.walk_to(*P(34, 26), **fast)
+    s.cat = [left, P(0, R(24, 28))[1]]
+    s.walk_to(*P(34, R(26, 29)), **fast)
     s.overlays.clear()
     s.play("on_hind_legs")
     s.hold("meow_sit", 0, 900)
@@ -356,9 +496,9 @@ def napping(s, name):                      # yawn, (walk to bed,) settle, curl u
     if s.room == "night":                  # after lights out: it's a daytime nap, so morning comes first
         s.fade_to("day")
     if not s.in_bed:
-        s.start(*s.stage.at(46, 26), anywhere=True)
+        s.start(*s.stage.at(s.stage.row(46, 34), s.stage.row(26, 29)), anywhere=True)
         s.play("yawn_stand")
-        s.go(*s.stage.bed)
+        s.go(*s.bed)
     s.play("sleep2_l", loops=4)
     s.overlays = [o for o in s.overlays if o[0] != "zzz"] + [("zzz", (200, 210, 255))]
     s.play("sleep3_l", loops=10)
@@ -366,11 +506,11 @@ def napping(s, name):                      # yawn, (walk to bed,) settle, curl u
 
 def waking(s, name):                       # lying in bed -> yawn -> wash -> up
     if s.entering:
-        s.origin = s.stage.bed
+        s.origin = s.bed
         s.settle_in_bed()
         s.fade_to("day")                   # after lights out: morning comes while she still sleeps
     else:
-        s.start(*s.stage.bed)
+        s.start(*s.bed)
     if not any(o[0] == "zzz" for o in s.overlays):
         s.overlays.append(("zzz", (200, 210, 255)))
     s.play("sleep1_l", loops=5)
@@ -378,23 +518,23 @@ def waking(s, name):                       # lying in bed -> yawn -> wash -> up
     s.play("yawn_lie")
     s.play("wash_lie")
     s.play("meow_lie")
-    s.go(s.stage.bed[0] + 14, s.stage.bed[1] - 3)   # up and out of bed
+    s.go(s.bed[0] + 14, s.bed[1] - 3)   # up and out of bed
     s.hold("meow_sit", 0, 900)
 
 
 def lights_out(s, name):
     if s.entering:
-        s.origin = s.stage.bed
+        s.origin = s.bed
         s.settle_in_bed()
         s.fade_to("night")                 # lights go out once she's settled
     else:
-        s.start(*s.stage.bed, room="night")
+        s.start(*s.bed, room="night")
     s.overlays = [("zzz", (120, 140, 210))]
     s.play("sleep3_l", loops=14)
 
 
 def asking(s, name):
-    s.start(*s.stage.plea, anywhere=s.stage is HOUSE, room="empty")
+    s.start(*s.stage.plea, anywhere=(s.stage.w, s.stage.h) == (W, H), room="empty")
     s.overlays.append(("bubble", "!"))
     s.play("meow_sit", loops=5)
     s.hold("meow_sit", 0, 500)
@@ -402,7 +542,7 @@ def asking(s, name):
 
 
 def hungry(s, name):                       # a banner scrolls "MOCHI IS HUNGRY!" while she meows
-    s.start(*s.stage.plea, anywhere=s.stage is HOUSE, room="empty")
+    s.start(*s.stage.plea, anywhere=(s.stage.w, s.stage.h) == (W, H), room="empty")
     message = f"{name.upper()} IS HUNGRY!"
     s.overlays.append(("banner", message))
     scroll_ms = (W + len(message) * 4) / 12 * 1000 + 2 * BANNER_SLIDE_MS
@@ -415,7 +555,7 @@ def hungry(s, name):                       # a banner scrolls "MOCHI IS HUNGRY!"
 
 def name_tag(s, name):
     again = s.entering and any(o[0] == "tag" for o in s.enter.overlays)
-    x, y = s.stage.at(32, 26)
+    x, y = s.stage.at(32, s.stage.row(26, 29))
     door = (s.stage.right if x > s.stage.w / 2 else s.stage.left, y)   # in from the nearer side
     if again:                              # her own screen, round again: out of the room and back in
         s.origin = door
@@ -434,7 +574,7 @@ def begging(s, name):                      # at the empty bowl, up on her hind l
     if s.entering:
         s.start(*s.stage.beg, room="empty")
     else:
-        s.start(*s.stage.at(36, 26), room="empty")
+        s.start(*s.stage.at(36, s.stage.row(26, 29)), room="empty")
         s.go(*s.stage.beg)
     for _ in range(2):
         s.play("on_hind_legs")
@@ -445,16 +585,16 @@ def begging(s, name):                      # at the empty bowl, up on her hind l
 
 
 def grumpy(s, name):
-    s.start(*s.stage.at(40, 26), anywhere=True)
+    s.start(*s.stage.at(s.stage.row(40, 34), s.stage.row(26, 29)), anywhere=True)
     s.overlays.append(("grumble",))
     s.play("hiss_r", loops=5)
     s.overlays.clear()
-    s.go(*s.stage.bed)
+    s.go(*s.bed)
     s.play("sleep2_l", loops=5)
 
 
 def scratching(s, name):
-    s.start(*s.stage.at(32, 26), anywhere=True)
+    s.start(*s.stage.at(32, s.stage.row(26, 29)), anywhere=True)
     s.play("scratch_r", loops=2)
     s.hold("meow_sit", 0, 700)
     s.play("scratch_r")
@@ -466,6 +606,8 @@ def toy(s, name):
     over to a carrot and nibbles it down to nothing."""
     if s.art.tuning.get("toy") == "carrot":
         return _carrot(s)
+    if stalk_toy(s.art) is None:            # no toy of her own here (and no pack mouse): her ball instead
+        return playing(s, name)
     reach = s.art.tuning.get("reach", 10)
     # she stalks it from whichever side she's on: on the right, it all happens the other way round
     ox, floor = s.stage.at(0, 28)
@@ -487,12 +629,14 @@ def toy(s, name):
         s.toy[1] = to
 
     if side == 1:   # stays put if she's already on the left, else goes round to the far side first
-        s.start(X(10), floor, anywhere=s.entering and seen and abs(s.cat[1] - floor) <= 2)
+        s.start(s.fit_x(X(10), ("meow_sit", "walk_right", "on_hind_legs")) if s.stage.front else X(10), floor,
+                anywhere=s.entering and seen and abs(s.cat[1] - floor) <= 2)
     else:           # on the right: from where she is, or a step over if she's short of her run-up
         s.start(max(s.cat[0], X(24)), floor)
     s.hold("meow_sit", 0, 300)
-    s.toy = ["mouse", s.stage.off(side, s.cat[0]), floor, side == -1, 0]
-    slide(X(46), 2.2)                       # the mouse skids in and stops
+    s.toy = [stalk_toy(s.art) or "mouse", s.stage.off(side, s.cat[0]), floor, side == -1, 0]
+    R = s.stage.row
+    slide(X(R(46, 40)), 2.2)                # the mouse skids in and stops (on the front floor, clear of the bowl)
     s.hold("meow_sit", 0, 900)              # she's spotted it
     if side * (X(24) - s.cat[0]) > 2:
         s.walk_to(X(24), floor, speed=0.5)  # creeps closer...
@@ -500,10 +644,10 @@ def toy(s, name):
         s.go(X(24), floor)
     s.hold("meow_sit", 0, 500)              # ...waits...
     s.play("on_hind_legs", frames=[0, 1])   # ...gathers herself...
-    s.walk_to(X(46) - side * near, floor, speed=3.0, stride_mult=3.0)  # ...and pounces
+    s.walk_to(X(R(46, 40)) - side * near, floor, speed=3.0, stride_mult=3.0)  # ...and pounces
     s.play(paw)
-    slide(X(52), 1.8)
-    s.go(X(52) - side * near, floor)
+    slide(X(R(52, 46)), 1.8)
+    s.go(X(R(52, 46)) - side * near, floor)
     s.play(paw)
     slide(s.stage.off(side, s.cat[0]), 1.6, spin=6, brake=False)   # and bats it right out of the room
     s.toy = None
@@ -511,12 +655,24 @@ def toy(s, name):
     s.play("wash_sit")
 
 
+def stalk_toy(art) -> str | None:
+    """The toy she stalks and bats about: her own first one (not the ball: that's playing), else the pack's
+    mouse, else none."""
+    for t in art.tuning.get("toys", ()):
+        if t.get("mode") == "bat" and t.get("name") != "ball" and t.get("name") in art.toys:
+            return t["name"]
+    return "mouse" if "mouse" in art.toys else None
+
+
 def _carrot(s):
     nose = 18                               # how far in front of her feet her nose is when she eats
-    s.start(*s.stage.bed, anywhere=True)
+    s.start(*s.bed, anywhere=True)
     s.hold("meow_sit", 0, 700)
     cx, floor = s.stage.at(44, 28)
-    s.toy = ["carrot_1", cx, floor, True, 0]   # tip towards her
+    own = next((t for t in s.art.tuning.get("toys", ()) if t.get("mode") == "eat" and t.get("name") in s.art.toys), None)
+    if own:
+        nose = own.get("nose", nose)
+    s.toy = [own["name"] if own else "carrot_1", cx, floor, True, 0]   # tip towards her
     s.go(cx - nose, floor)
     for bite in (0, 3, 6, 9):               # she eats it from her end, a bit at a time
         s.toy[1], s.toy[4] = cx - bite, bite  # she pulls it in as she eats, so it stays at her nose
@@ -529,6 +685,8 @@ def _carrot(s):
 def bee(s, name):
     """A bee drifts in; she watches it, sits up tall as it buzzes over her head, swats at it as
     it dips past, and it flies off."""
+    if "bee" not in s.art.toys:             # (the bee is the pack's art: without it, a quiet moment instead)
+        return idle(s, name)
     hx, hy = s.stage.at(30, 28)
     s.start(hx, hy, anywhere=s.entering and abs(s.cat[0] - hx) <= 8 and abs(s.cat[1] - hy) <= 2)
     # it crosses the house's floor; in a bigger room, the part of it around her
@@ -578,8 +736,8 @@ def record(art: Art, mode: str, name: str, enter: Shot | None = None, stage: Sta
 
 
 def script_for(art: Art, mode: str, name: str, enter: Shot | None = None, stage: Stage = HOUSE) -> Script:
-    script = Script(art, stage, cat=list(stage.at(*CENTRE)))
-    script.ball = list(stage.at(*art.tuning.get("ball", BALL_HOME)))
+    script = Script(art, stage, cat=list(stage.centre))
+    script.ball = list(ball_home(art, stage))
     if enter is not None:
         script.enter, script.room, script.cat = enter, enter.room, list(enter.cat)
         if enter.ball is not None:
@@ -593,7 +751,7 @@ def script_for(art: Art, mode: str, name: str, enter: Shot | None = None, stage:
 def link(art: Art, end: Shot, head: Shot, stage: Stage = HOUSE) -> list[Shot]:
     """From the loop's last shot back to its first shot, so the loop closes without a jump."""
     s = Script(art, stage, room=end.room, cat=list(end.cat), ball=list(end.ball) if end.ball else
-               list(stage.at(*art.tuning.get("ball", BALL_HOME))))
+               list(ball_home(art, stage)))
     s.enter = end
     if end.tag in LYING:
         s.overlays = [o for o in end.overlays if o[0] == "zzz"]

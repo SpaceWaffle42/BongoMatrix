@@ -364,9 +364,15 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
 
     @app.get("/api/pets")
     def pet_catalogue():
-        """The animals there's art for and their coats, each with a little face for the picker."""
-        return jsonify(kinds=[{"kind": k, "default": pets.default_coat(k), "collars": pets.collars(k),
-                               "coats": [{**c, "face": face_uri(k, c["id"])} for c in pets.coat_names(k)]}
+        """The animals there's art for and their coats, each with a little picture for the picker: the animal
+        (``group``: the dog's shapes are one animal), then its shapes, then each shape's colours."""
+        return jsonify(kinds=[{"kind": k, "title": pets.title(k), "group": pets.group(k),
+                               "group_title": pets.title(pets.group(k)), "name": pets.default_name(k),
+                               "accessory": pets.accessory(k),
+                               "default": pets.default_coat(k), "collars": pets.collars(k),
+                               "face": face_uri(k, pets.default_coat(k)),
+                               "coats": [{**c, "shape": pets.shape(c["id"]), "face": face_uri(k, c["id"])}
+                                         for c in pets.coat_names(k)]}
                               for k in pets.kinds()])
 
     pack_job = {"state": "idle", "message": "", "made": []}   # one pet pack import at a time

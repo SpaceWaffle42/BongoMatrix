@@ -597,59 +597,97 @@ function wifiCard() {
   return card;
 }
 
-/** The Matrix's one pet: which animal and its name, shared by the Pet module, Wander and the Pet clock. */
+/** The Matrix's one pet: which animal and its name, shared by the Pet module, Wander and the Pet clock.
+ * Picture tiles: the animal, then its shape (the dog has three), then its colour (coat ids "shape.colour"). */
 const PET_NAME = /^[A-Za-z0-9 '.!?-]{1,12}$/;
 
 function petCard() {
   const pet = { kind: 'cat', name: 'Mochi', coat: '', collar: '', dress_up: true, ...(S.config.pet || {}) };
-  const kinds = S.state?.pet_kinds?.length ? S.state.pet_kinds : ['cat'];
-  const kind = h('select', { class: 'input', id: 'pet-kind' }, kinds.map((k) => h('option', { value: k, selected: k === pet.kind || null }, humanize(k))));
-  const name = h('input', { class: 'input', id: 'pet-name', maxlength: 12, value: pet.name, autocomplete: 'off', spellcheck: 'false' });
-  const coatName = h('span', { class: 'mono strong' });
-  const grid = h('div', { class: 'coat-grid', role: 'radiogroup', 'aria-label': 'Coat' });
-  const coatRow = h('div', { class: 'stack gap-s', hidden: true }, h('div', { class: 'row between' }, h('span', null, 'Coat'), coatName), grid);
-  let catalogue = [];
+  let catalogue = (S.state?.pet_kinds?.length ? S.state.pet_kinds : ['cat']).map((k) => ({ kind: k, title: humanize(k), group: k, group_title: humanize(k), coats: [], collars: [] }));
+  let kind = pet.kind;
   let coat = pet.coat;
   let dressUp = pet.dress_up !== false;
+  const name = h('input', { class: 'input', id: 'pet-name', maxlength: 12, value: pet.name, autocomplete: 'off', spellcheck: 'false' });
+  const tiles = (label) => h('div', { class: 'pet-tiles', role: 'radiogroup', 'aria-label': label });
+  const animals = tiles('Animal');
+  const shapes = tiles('Shape');
+  const colours = h('div', { class: 'coat-grid', role: 'radiogroup', 'aria-label': 'Colour' });
+  const chosen = { animal: h('span', { class: 'mono strong' }), shape: h('span', { class: 'mono strong' }), colour: h('span', { class: 'mono strong' }) };
+  const row = (label, said, box) => h('div', { class: 'stack gap-s' }, h('div', { class: 'row between' }, h('span', null, label), said), box);
+  const shapeRow = row('Shape', chosen.shape, shapes);
+  const colourRow = row('Colour', chosen.colour, colours);
   const collar = h('select', { class: 'input', id: 'pet-collar' });
   const wardrobe = h('div', { class: 'grid-2', hidden: true },
-    h('label', { class: 'field-col', for: collar.id }, 'Collar', collar),
+    h('label', { class: 'field-col', for: collar.id }, 'Accessory', collar),
     h('div', { class: 'field-col' }, 'Seasonal outfits',
       toggle(dressUp, 'Dress up for Christmas and Valentine’s', (v) => { dressUp = v; })));
-  const pick = (id) => {
-    coat = id;
-    for (const b of grid.children) b.setAttribute('aria-checked', String(b.dataset.coat === id));
-    coatName.textContent = grid.querySelector(`[data-coat="${CSS.escape(id)}"]`)?.title || '';
-  };
-  const showCoats = () => {
-    const entry = catalogue.find((k) => k.kind === kind.value);
-    const coats = entry?.coats || [];
-    coatRow.hidden = coats.length < 2;
-    grid.replaceChildren(...coats.map((c) => h('button', {
-      type: 'button', class: 'coat', role: 'radio', title: c.name, 'aria-label': c.name, 'data-coat': c.id, onclick: () => pick(c.id),
+  const entry = (k) => catalogue.find((e) => e.kind === k) || catalogue[0];
+  const shapeOf = (id) => (/^[a-z_]+\.[a-z_]+$/.test(id || '') ? id.split('.')[0] : '');
+  const tile = (attrs, face, label, on) => h('button', {
+    type: 'button', class: 'pet-tile', role: 'radio', 'aria-checked': String(on), 'aria-label': label, title: label, ...attrs,
+  }, face ? h('img', { src: face, alt: '' }) : h('span', { class: 'pet-tile-blank' }), h('span', { class: 'small' }, label));
+  const show = () => {
+    const e = entry(kind);
+    kind = e.kind;
+    const groups = catalogue.filter((k, i) => catalogue.findIndex((o) => (o.group || o.kind) === (k.group || k.kind)) === i);   // each animal's first kind
+    animals.replaceChildren(...groups.map((g) => tile({ 'data-group': g.group || g.kind, onclick: () => pickKind(g.kind) },
+      g.face, g.group_title || g.title, (g.group || g.kind) === (e.group || e.kind))));
+    chosen.animal.textContent = e.group_title || e.title;
+    const siblings = catalogue.filter((k) => (k.group || k.kind) === (e.group || e.kind));
+    const options = siblings.flatMap((k) => {
+      const kinds = [...new Set(k.coats.map((c) => c.shape || ''))];
+      return (kinds.length ? kinds : ['']).map((sh) => ({ kind: k, shape: sh, first: k.coats.find((c) => (c.shape || '') === sh) }));
+    });
+    const current = shapeOf(coat) || (e.coats.find((c) => c.id === e.default)?.shape || '');
+    shapes.replaceChildren(...options.map((o) => {
+      const label = o.kind.title + (options.filter((x) => x.kind === o.kind).length > 1 && o.shape ? ` (${humanize(o.shape)})` : '');
+      return tile({ 'data-kind': o.kind.kind, 'data-shape': o.shape, onclick: () => pickShape(o.kind.kind, o.shape) },
+        o.first?.face || o.kind.face, label, o.kind.kind === kind && o.shape === current);
+    }));
+    shapeRow.hidden = options.length < 2;
+    chosen.shape.textContent = e.title;
+    const inShape = e.coats.filter((c) => (c.shape || '') === current);
+    const list = inShape.length ? inShape : e.coats;
+    if (!list.some((c) => c.id === coat)) coat = list.some((c) => c.id === e.default) ? e.default : (list[0]?.id || '');
+    colours.replaceChildren(...list.map((c) => h('button', {
+      type: 'button', class: 'coat', role: 'radio', title: c.name, 'aria-label': c.name, 'data-coat': c.id,
+      'aria-checked': String(c.id === coat), onclick: () => { coat = c.id; show(); },
     }, c.face ? h('img', { src: c.face, alt: '' }) : h('span', { class: 'small' }, c.name))));
-    pick(coats.some((c) => c.id === coat) ? coat : (entry?.default || coats[0]?.id || ''));
-    const colours = entry?.collars || [];
-    wardrobe.hidden = !colours.length;
-    collar.replaceChildren(h('option', { value: '' }, 'No collar'),
-      ...colours.map((c) => h('option', { value: c, selected: c === pet.collar || null }, humanize(c))));
+    colourRow.hidden = list.length < 2;
+    chosen.colour.textContent = list.find((c) => c.id === coat)?.name || '';
+    const have = e.collars || [];
+    wardrobe.hidden = !have.length;
+    collar.replaceChildren(h('option', { value: '' }, 'None'),
+      ...have.map((c) => h('option', { value: c, selected: c === pet.collar || null }, `${humanize(c)} ${e.accessory || 'collar'}`)));
   };
-  kind.addEventListener('change', () => { coat = ''; showCoats(); });
-  get('/api/pets').then((r) => { catalogue = r.kinds || []; showCoats(); }).catch(() => { /* older Pi: no coats to pick */ });
+  const pickKind = (k) => {
+    const was = entry(kind);
+    const next = entry(k);
+    if (!name.value.trim() || name.value.trim() === was.name) name.value = next.name || name.value;   // her name, unless you gave one
+    kind = next.kind; coat = next.default || ''; show();
+  };
+  const pickShape = (k, sh) => {
+    if (k !== kind) pickKind(k);
+    const e = entry(kind);
+    coat = (e.coats.find((c) => c.id === e.default && (c.shape || '') === sh) || e.coats.find((c) => (c.shape || '') === sh))?.id || coat;
+    show();
+  };
+  show();
+  get('/api/pets').then((r) => { if (r.kinds?.length) catalogue = r.kinds; show(); }).catch(() => { /* older Pi: names only */ });
   const save = h('button', { type: 'button', class: 'btn primary' }, 'Save');
   save.onclick = () => {
     const n = name.value.trim();
-    if (!PET_NAME.test(n)) { toast("Names are 1 to 12 letters, digits or spaces (and ' . ! ? -), so they fit her name tag", 'error'); name.focus(); return; }
+    if (!PET_NAME.test(n)) { toast("Names are 1 to 12 letters, digits or spaces (and ' . ! ? -), so they fit its name tag", 'error'); name.focus(); return; }
     const outfits = wardrobe.hidden ? {} : { ...(collar.value ? { collar: collar.value } : {}), dress_up: dressUp };
-    saveConfig({ pet: { kind: kind.value, name: n, ...(coat ? { coat } : {}), ...outfits } }, 'Pet');
+    saveConfig({ pet: { kind, name: n, ...(coat ? { coat } : {}), ...outfits } }, 'Pet');
   };
   return h('section', { class: 'card stack', 'aria-label': 'Pet' },
     h('div', null, h('h2', { class: 'h2' }, 'Pet'),
       h('p', { class: 'muted small flush' }, 'One pet per Matrix: the Pet screens, the Wander overlay and the Pet clock all show this one.')),
-    h('div', { class: 'grid-2' },
-      h('label', { class: 'field-col', for: kind.id }, 'Animal', kind),
-      h('label', { class: 'field-col', for: name.id }, 'Name', name)),
-    coatRow,
+    row('Animal', chosen.animal, animals),
+    shapeRow,
+    colourRow,
+    h('label', { class: 'field-col', for: name.id }, 'Name', name),
     wardrobe,
     h('div', { class: 'row end' }, save));
 }

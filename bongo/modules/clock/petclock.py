@@ -102,7 +102,11 @@ class PetClock(Style):
         return self._art
 
     def scene_list(self, now):
-        return TALL_SCENES if is_tall(self.art(now)) else SCENES
+        pet = self.ctx.pet
+        own = load(pet.kind, pet.coat).tuning.get("clock_scenes")   # a kind that can't reach the digits says which
+        if own:
+            return tuple(s for s in own if s in SCENES + TALL_SCENES)
+        return TALL_SCENES if is_tall(load(pet.kind, pet.coat)) else SCENES   # measured undressed: a hat changes nothing
 
     def render(self, now):
         text = hm(now, self.settings["hours"])
@@ -403,7 +407,9 @@ class Script:
             return self.touching(ball_x, still, self.low_reach(bat, still[3] - still[1])[1])
         want = min(gaps) - 1                                 # round(cx + 1 - offset) must come to this
         off = body_offset(self.art, bat)
-        return next(cx for cx in range(round(want + off) - 3, round(want + off) + 3) if round(cx + 1 - off) == want)
+        # a body centre on a half pixel can't always round to ``want``: then the nearest spot short of the ball
+        return next((cx for cx in range(round(want + off) - 3, round(want + off) + 3) if round(cx + 1 - off) == want),
+                    math.floor(want + off - 1))
 
     def touching(self, ball_x, box, reach):
         """Where she stands: a pixel short of the ball, so only the strike (a lunge of one pixel)

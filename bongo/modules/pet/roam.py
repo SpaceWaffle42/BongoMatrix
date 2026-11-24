@@ -36,7 +36,7 @@ def night_at(when: dt.datetime) -> bool:
 
 class Roamer:
     def __init__(self, art, room, name: str, start: dt.datetime, seed: str):
-        self.art, self.room, self.stage, self.name = art, room, room.stage, name
+        self.art, self.room, self.stage, self.name = art, room, scenes.stage_for(art, room), name
         self.rng = random.Random(seed)
         self.clock = start                    # when her next action begins
         self.needs = {k: self.rng.uniform(0.1, 0.6) for k in RATES}
@@ -85,7 +85,7 @@ class Roamer:
                 s.shot("sleep3_l", 0, 1)
                 last = s.shots[0]
             else:
-                s = Script(self.art, self.stage, cat=list(self.stage.at(*scenes.CENTRE)), free=True)
+                s = Script(self.art, self.stage, cat=list(self.stage.centre), free=True)
                 s.ball = list(self.stage.at(44, self.art.tuning.get("ball", scenes.BALL_HOME)[1]))   # out on the open floor
                 return s
         s = Script(self.art, self.stage, room=last.room, cat=list(last.cat), perch=last.perch, free=True)
@@ -111,7 +111,7 @@ class Roamer:
         hour = self.clock.hour + self.clock.minute / 60
         if 0 <= (NIGHT[0] - hour) % 24 <= 1:
             odds["nap"] = 0                   # nearly bedtime: she saves it for the night
-        if "mouse" not in self.art.toys or self.art.tuning.get("toy") == "carrot":
+        if scenes.stalk_toy(self.art) is None or self.art.tuning.get("toy") == "carrot":
             odds["mouse"] = 0
         if "bee" not in self.art.toys:
             odds["bee"] = 0
@@ -158,7 +158,7 @@ class Roamer:
             x, y = self.rng.randrange(10, w - 10), self.rng.randrange(self.room.floor_top + 2, h - 3)
             if self.open(x, y) and math.dist((x, y), s.cat) >= 16 and (s.ball is None or math.dist((x, y), s.ball) >= 14):
                 return x, y
-        return self.stage.at(*scenes.CENTRE)
+        return self.stage.centre
 
     # -- what she does ------------------------------------------------------------------------
     def eat(self, s: Script):
@@ -304,7 +304,7 @@ class Roamer:
         self.needs["play"] = 0.0
 
     def _scene(self, s: Script, mode: str):
-        self.walk(s, *self.stage.at(*scenes.CENTRE))   # to the open floor the scenes are written for
+        self.walk(s, *self.stage.centre)   # to the open floor the scenes are written for
         scenes.MODES[mode](s, self.name)
 
     def mouse(self, s: Script):
@@ -316,7 +316,7 @@ class Roamer:
 
     def zoom(self, s: Script):
         """Zoomies: dashes to and fro across the open floor (the view stays put while she tears about)."""
-        self.walk(s, *self.stage.at(*scenes.CENTRE))
+        self.walk(s, *self.stage.centre)
         cx, cy = s.cat
         speed, stride = self.art.tuning.get("zoomies", (3.0, 3.0))
         s.overlays.append(("dust",))
