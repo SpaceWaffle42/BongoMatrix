@@ -31,7 +31,7 @@ BUILT_IN = Path(__file__).resolve().parents[1] / "resources" / "pet"
 # the dog's breeds, each its own kind (Settings > Pet shows them under Dog, after Biscuit)
 DOGS = ["jackrussell", "spaniel", "dachshund", "corgi", "frenchie", "pug", "shepherd", "cockapoo"]
 # the animals in the order Settings > Pet shows them
-ORDER = ["cat", "bunny", "dog", *DOGS, "hamster", "lizard", "flamingo", "monster", "rock"]
+ORDER = ["cat", "bunny", "dog", *DOGS, "hamster", "lizard", "flamingo", "sheep", "monster", "rock"]
 
 
 def art_file(name: str) -> Path:

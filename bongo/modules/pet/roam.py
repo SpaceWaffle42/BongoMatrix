@@ -95,6 +95,11 @@ class Roamer:
             s.overlays = [o for o in last.overlays if o[0] == "zzz"]
         return s
 
+    @property
+    def climbs(self) -> bool:
+        """Whether she goes up onto the furniture at all (a kind's tuning "climbs": false keeps to low things)."""
+        return self.art.tuning.get("climbs", True) is not False
+
     def choose(self) -> str:
         if night_at(self.clock):
             return "night"
@@ -103,7 +108,7 @@ class Roamer:
         n = self.needs
         odds = {"eat": max(0.0, n["food"] - 0.55) ** 2 * 30, "nap": n["sleep"] ** 3 * 5, "ball": n["play"] ** 2 * 2.5,
                 "mouse": n["play"] ** 2 * 1.2, "zoom": n["play"] ** 3 * 1.2, "wash": n["wash"] ** 2 * 2,
-                "wander": 0.5, "sit": 0.5, "perch": 0.2 if self.room.perches else 0,
+                "wander": 0.5, "sit": 0.5, "perch": 0.2 if self.room.perches and self.climbs else 0,
                 "scratch": 0.2 if self.room.posts else 0}
         up = bool(self.last is not None and self.last.perch)
         if not up and (self.clock - self.grounded).total_seconds() < TREE_REST:
@@ -234,7 +239,8 @@ class Roamer:
         s.hold("meow_sit", 0, self.rng.randint(1500, 4500))
 
     def perch(self, s: Script):
-        """Up onto the furniture: to the take-off spot, a jump for each level, then a look round."""
+        """Up onto the furniture: to the take-off spot, a jump for each level, then a look round (only ever chosen
+        where there are perches and she climbs: choose)."""
         perches = self.room.perches
         top = self.rng.choice(sorted(perches))
         chain, at = [], top
