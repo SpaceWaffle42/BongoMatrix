@@ -200,7 +200,7 @@ def keep_playing(config: dict, path, modules, live, play_config, wait: float = 1
 
 
 def remove_old_pet_art() -> None:
-    """Last Tick's pack art is gone (24 Nov 2026): delete any copies, before the config is read. Never in the way of
+    """The old pet pack's art is gone (24 Nov 2026): delete any copies, before the config is read. Never in the way of
     starting (pets.remove_pack_files logs what it removed, and what it couldn't)."""
     try:
         from bongo import pets

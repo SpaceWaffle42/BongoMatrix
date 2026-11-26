@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime as dt
 import random
+import re
 from dataclasses import dataclass, field
 from typing import Callable
 from zoneinfo import ZoneInfo
@@ -165,6 +166,28 @@ def home_connect(timeout: float = 5.0):
     return host.home_connect(timeout)
 
 
+ID = re.compile(r"[a-z0-9_]{1,40}")   # a style or a module id in page_links: what the dashboard's /modules/<id> route takes
+SETTINGS_PAGE_SCRIPT = re.compile(r"[a-z0-9_-]+\.js")   # a file name in the dashboard's js folder, never a path
+SETTINGS_PAGE_TEXT = {"title": 40, "card": 40, "blurb": 300}   # the words a page declares, and the most of each
+
+
+def settings_page_problems(page) -> list[str]:
+    """What is wrong with a module's ``settings_page`` (none: fine). Only these keys, only plain words (the dashboard
+    shows them as text, never as markup) and a script that is a bare file name."""
+    if page is None:
+        return []
+    if not isinstance(page, dict) or set(page) - {"script", *SETTINGS_PAGE_TEXT} or not {"title", "script"} <= set(page):
+        return ["settings_page: an object with title and script, and optionally card and blurb"]
+    out = []
+    if not isinstance(page["script"], str) or not SETTINGS_PAGE_SCRIPT.fullmatch(page["script"]):
+        out.append("settings_page.script: a file name like petpage.js")
+    for key, most in SETTINGS_PAGE_TEXT.items():
+        if key in page and (not isinstance(page[key], str) or not page[key].strip() or len(page[key]) > most
+                            or re.search(r"[<>&\x00-\x1f\x7f-\x9f\u061c\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]", page[key])):
+            out.append(f"settings_page.{key}: plain words, up to {most} characters, with no < > or & and no control or text-direction characters")
+    return out
+
+
 @dataclass(frozen=True)
 class Module:
     id: str
@@ -253,6 +276,22 @@ class Module:
     # ``background``: a ``Background`` class, for an imported module that keeps working while none of its
     # screens is on the panel (it may then have no styles at all). See docs/MODULES.md.
     background: type | None = None
+    # ``settings_page={"title": "Pet", "script": "petpage.js", "blurb": "..."}``: a page of the dashboard for what is
+    # the same for every screen of this module, served at /modules/<id> and reached from the module's row in
+    # Settings > Modules. ``script``: a file in the dashboard's js folder that exports ``render(view)``; ``card``: the
+    # title of the card its screens' editors show, ``blurb``: what that card says (plain words; checked above). Only for
+    # a module that comes with the Matrix. ``page_links`` below.
+    settings_page: dict | None = None
+    # ``page_links={"pet": "pet"}``: this module's style "pet" also shows another module's settings-page card in its
+    # editor (the Clock's Pet style uses the Pet module's pet), so it is one tap from there to that page.
+    page_links: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not isinstance(self.page_links, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) and ID.fullmatch(k) and ID.fullmatch(v) for k, v in self.page_links.items()):
+            raise ValueError(f"{self.id}: page_links: {{style: module id}}, both made of a-z, 0-9 and _ (up to 40 characters)")
+        if problems := settings_page_problems(self.settings_page):
+            raise ValueError(f"{self.id}: {'; '.join(problems)}")
 
     @property
     def default_style(self) -> str | None:

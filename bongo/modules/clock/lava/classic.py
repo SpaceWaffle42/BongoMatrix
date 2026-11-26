@@ -37,7 +37,7 @@ class Classic(Glides, Scrolls, Style):
         # Pi managed with its pure-Python drawing, so 2.5 px/s keeps v2's pace at any frame rate.
         blob_count=4, blob_min_radius=5, blob_max_radius=10, drift=2.5,
         threshold=1.0, edge_width=4, blur_radius=2,
-        time_font="9x18B", date_font="clR6x12", time_y=None, date_y=None,  # None: fit the canvas
+        time_font="9x18B", date_font="6x12", time_y=None, date_y=None,  # None: fit the canvas
         text_colour="#ffffff", border_colour="#000000", date_format="%d %b",
     )
 

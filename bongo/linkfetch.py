@@ -1,5 +1,5 @@
 """Importing a module from a link that isn't GitHub (Settings > Modules > Import): a GitLab project, on gitlab.com
-or a GitLab of your own (http://gitlab.home.lan/group/project), or a direct link to a .zip.
+or a GitLab of your own (https://git.example.org/group/project), or a direct link to a .zip.
 
 GitHub links are bongo/addons.py's own (``fetch_github``) and are unchanged. Everything here is fetched by the
 Matrix itself, so the fetch is careful:

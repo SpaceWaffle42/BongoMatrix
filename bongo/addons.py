@@ -235,7 +235,7 @@ def _open(archive: Path) -> zipfile.ZipFile:
 
 
 def _top(names: list[str]) -> str:
-    """The one folder everything in an archive sits in ("bongo_imports-main/"), dropped; "" if there isn't one, or
+    """The one folder everything in an archive sits in ("BongoMatrix-imports-main/"), dropped; "" if there isn't one, or
     the module is at the very top."""
     if MANIFEST in names:
         return ""
@@ -250,7 +250,7 @@ def _safe_part(part: str) -> bool:
 def scan(archive: Path, builtin_ids=()) -> list[dict]:
     """Every module in an archive: [{"folder": "" (the archive is one module) or "sports", "manifest" or
     "problem"}]. A folder counts if it holds both a bongo-module.json and an __init__.py: the top of the archive
-    itself, or one folder down (bongo_imports/sports/), never deeper (so a module's own folders are never other
+    itself, or one folder down (BongoMatrix-imports/sports/), never deeper (so a module's own folders are never other
     modules). Nothing is unpacked here, and only plain files count."""
     with _open(archive) as zf:
         infos = zf.infolist()

@@ -18,6 +18,7 @@ import logging
 
 from flask import jsonify, request
 
+from bongo import fonts as font_tools
 from bongo import addons, config as cfg
 from bongo.panelpreview import Ended, Held, NotYours, Stuck
 
@@ -39,7 +40,7 @@ def register(app, *, modules, live, pairing, load, cookie, fonts=None) -> None:
 
     def build(sent: dict):
         """The draft as a screen ready to draw, as (style, module id, style name, gave_up) or the answer saying why not."""
-        entry, index = sent.get("entry"), sent.get("index", 0)
+        entry, index = font_tools.renamed(sent.get("entry")), sent.get("index", 0)   # (a removed font: its replacement)
         if not (isinstance(index, int) and not isinstance(index, bool) and 0 <= index <= MOST_INDEX):
             return None, (jsonify(problems=[f"index: the screen's place in the playlist, a whole number from 0 to {MOST_INDEX}"]), 422)
         where = f"playlist[{index}]"

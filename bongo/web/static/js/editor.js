@@ -6,6 +6,7 @@ import { openPreview } from './mediaview.js';
 import { helpButton, troubleNote } from './help.js';
 import { iconPicker } from './iconpick.js';
 import { feedFilters } from './feedfilters.js';
+import { pageOf, pageFor } from './modpage.js';
 import { S, onLeave, go, href, path, moduleById, styleOf, entryName, applyDraft, draftChanged, matrixClock, problemOf, problemLine } from './app.js';
 import { MOST_TIMES, mins, valid, joined, sentence, sleepTime, meetsSleep, suggest, moved } from './times.js';
 import { panelPreview } from './panelpreview.js';
@@ -55,6 +56,7 @@ export function render(view, match) {
       h('button', { type: 'button', class: 'btn primary', onclick: apply }, 'Apply to Matrix')));
   view.append(head);
   if (onPanel) view.append(onPanel.notices);
+  if (S.kept) { S.kept = false; view.append(h('div', { class: 'note' }, icon('info'), h('span', null, 'Back from the settings page. Your edits to this screen were kept in the playlist draft.'))); }
   if (!mod) {
     view.append(h('div', { class: 'card stack' }, h('p', { class: 'error-box' }, `The module “${e.module}” isn't installed on this Matrix, so it can't be edited.`),
       h('button', { type: 'button', class: 'btn', onclick: () => go('/playlist') }, 'Back to the playlist')));
@@ -156,6 +158,7 @@ export function render(view, match) {
       else { seconds.setAttribute('aria-invalid', 'true'); seconds.setAttribute('aria-describedby', secondsError.id); }   // (Save and Apply wait for a good one)
     });
     sections.replaceChildren(
+      ...[pageCard()].filter(Boolean),
       h('section', { class: 'card stack', 'aria-label': 'Timing' }, h('h2', { class: 'h2' }, 'Timing'),
         h('div', { class: 'grid-2' },
           e.module === 'splash'  // its length comes from the picked file: one pass of a GIF
@@ -280,7 +283,7 @@ export function render(view, match) {
     if (!fields.length) return null;
     const count = counter(fields);
     const sec = h('section', { class: 'card stack', 'aria-label': 'Settings' },
-      h('div', { class: 'row between wrap' }, h('h2', { class: 'h2' }, `${mod.name} settings`), count),
+      h('div', { class: 'row between wrap' }, h('h2', { class: 'h2' }, mod.settings_page ? 'This screen' : `${mod.name} settings`), count),   // (a module with a page of its own: that is the module's settings)
       h('div', { class: 'fields' }, fields.map(fieldRow)));
     sec.recount = count.recount;
     return sec;
@@ -492,11 +495,30 @@ export function render(view, match) {
     clearTimeout(thumbTimer);
     thumbTimer = setTimeout(() => { rowLoop?.refresh(); thumbs.forEach((t) => t.refresh()); }, 800);
   }
+  /** A screen whose module has a settings page of its own, or whose style uses another module's (``page_links``): what
+   *  is the same for all of them is set on that page, apart from Apply. Going there keeps this screen's edits in the
+   *  playlist draft; the page links back. */
+  function pageCard() {
+    const owner = pageFor(mod, styleOf(e));
+    if (!owner) return null;
+    const { page } = owner, there = pageOf(owner.mod.id);
+    const open = () => {
+      S.back = { to: `/edit/${i}`, label: `${entryName(e)} · ${humanize(styleOf(e))}` };
+      keepDraft(there);
+      if (path() !== there) S.back = null;   // (it didn't go: the times or seconds need fixing first)
+    };
+    return h('section', { class: 'card stack', 'aria-label': page.card || `${page.title} settings` },
+      h('div', { class: 'row between wrap gap-s' }, h('h2', { class: 'h2' }, page.card || `${page.title} settings`), h('span', { class: 'tag shared-tag' }, 'Shared')),
+      h('div', { class: 'style-row your-pet-line' },
+        h('span', { class: 'style-row-text grow min0' }, h('span', { class: 'muted small' }, page.blurb || '')),
+        h('a', { class: 'btn', href: href(there), 'data-route': there, onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); open(); } }, `${page.title} settings`, icon('right'))),
+      h('p', { class: 'tiny muted flush' }, 'Changes are saved on that page, not with Apply.'));
+  }
   function cancel() {
     if (!same(e, original) && !confirm('Throw away your edits to this module?')) return;
     go('/playlist');
   }
-  function keepDraft() { if (!timesOk() || !secondsOk() || gone()) return; S.draft[i] = clone(e); draftChanged(); go('/playlist'); }
+  function keepDraft(to) { if (!timesOk() || !secondsOk() || gone()) return; S.draft[i] = clone(e); draftChanged(); go(typeof to === 'string' ? to : '/playlist'); }   // (to: another page, which links back)
   async function apply() {
     if (!timesOk() || !secondsOk() || gone()) return;
     S.draft[i] = clone(e);

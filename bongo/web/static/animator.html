@@ -7,15 +7,12 @@
 <link rel="icon" type="image/png" href="logo.png?size=32">
 <link rel="apple-touch-icon" href="logo.png?size=180&amp;tile">
 <style>
-@font-face { font-family:Inter; src:url("fonts/inter.woff2") format("woff2"); font-weight:400 700; font-style:normal; font-display:swap; }
-@font-face { font-family:"Space Grotesk"; src:url("fonts/space-grotesk.woff2") format("woff2"); font-weight:400 700; font-style:normal; font-display:swap; }
-@font-face { font-family:"JetBrains Mono"; src:url("fonts/jetbrains-mono.woff2") format("woff2"); font-weight:400 700; font-style:normal; font-display:swap; }
 :root {
   --page:#0B0C0E; --head:#0E1013; --card:#131519; --card-2:#181B1F; --well:#08090A; --raise:#1A1D22;
   --line:#22262C; --line-2:#2C3139; --text:#ECEEF1; --soft:#C9CED6; --muted:#9AA1AC; --faint:#8A919C;
   --amber:#FFB547; --amber-hover:#FFCB7A; --ink:#1A1300; --amber-bg:#2A2114; --danger:#FF8A92;
-  --ui: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; --head-font:"Space Grotesk", Inter, sans-serif;
-  --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+  --ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", "Liberation Sans", Arial, sans-serif; --head-font: var(--ui);
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace;
   color-scheme: dark;
 }
 * { box-sizing:border-box; }

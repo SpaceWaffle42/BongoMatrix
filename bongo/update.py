@@ -40,8 +40,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 DATA = Path(os.environ.get("BONGO_DATA") or REPO / "data")   # (as bongo/paths.py: this file uses only Python's own library)
-DEFAULT_URL = "http://gitlab.home.lan/matrix_display/bongo_matrix.git"
-DEFAULT_BRANCH = "prod_device"   # only the files the display needs (see tools/prod_tree.py)
+DEFAULT_URL = "https://github.com/SpaceWaffle42/BongoMatrix"
+DEFAULT_BRANCH = "main"   # the public build: only the files the display needs
 SERVICE = "bongo-matrix"
 HEALTH_SECONDS = 150   # for the restarted display to come good (a Pi Zero takes a while to start)
 HEALTH_HOLD = 20       # ...and how long it must stay good: a version that crashes at start-up restarts every 3 s
@@ -67,6 +67,16 @@ def status_path(data: Path = None) -> Path:
     return (data or DATA) / "update-status.json"
 
 
+def _fingerprint(url: str) -> str | None:
+    """"host/group/repo" of a git address (no scheme, sign-in, port, ".git" or trailing "/", in lower case), hashed."""
+    found = re.fullmatch(r"(?:(?:https?|ssh|git)://(?:[^/@\s]*@)?([^/:@\s]+)(?::\d*)?/|[\w.-]+@([^/:@\s]+):)(\S+?)(?:\.git)?/*",
+                         url.strip(), re.I) if isinstance(url, str) else None
+    if not found:
+        return None
+    where = f"{found.group(1) or found.group(2)}/{found.group(3)}".lower()
+    return hashlib.sha256(where.encode()).hexdigest()[:16]
+
+
 def source(config: dict) -> tuple[str, str]:
     rule = config.get("update") if isinstance(config, dict) else None
     url, branch = (rule.get("url"), rule.get("branch")) if isinstance(rule, dict) else (None, None)
@@ -86,7 +96,7 @@ def problems(rule) -> list[str]:
         out.append("update.url: a git address such as https://host/group/repo.git or git@host:group/repo.git")
     if branch is not None and (not isinstance(branch, str) or not BRANCH.fullmatch(branch) or branch.startswith("-")
                                or ".." in branch):
-        out.append("update.branch: a branch name such as prod_device")
+        out.append("update.branch: a branch name such as main")
     return out
 
 
@@ -212,12 +222,27 @@ def _scrub(said: str, url: str | None = None, branch: str | None = None) -> str:
     return " / ".join((telling or lines)[-3:])
 
 
-def _git(*args, repo: Path = REPO, timeout: float = GIT_TIMEOUT, hide: tuple = ()) -> str:
-    """Run git here. ``hide``: the update address and branch, when the command names them (for ``_scrub``)."""
+def signed_out(url: str) -> list[str]:
+    """git options for a command that talks to ``url``. The default source is public and never needs a sign-in, so
+    git is told to use none for it: no credential helper and no extra header from the checkout's own or the system's
+    git settings (a Matrix first set up from a private server may have one that hands its token to any host that
+    asks). Any other source keeps whatever sign-in its owner set up for it."""
+    if _fingerprint(url) != _fingerprint(DEFAULT_URL):   # (the same address however it's written: ".git", a "/", capitals)
+        return []
+    out = ["-c", "credential.helper=", "-c", "http.extraHeader="]
+    for scope in ("https://github.com/", DEFAULT_URL, DEFAULT_URL + ".git"):   # settings kept for that address alone
+        out += ["-c", f"credential.{scope}.helper=", "-c", f"http.{scope}.extraHeader="]
+    return out
+
+
+def _git(*args, repo: Path = REPO, timeout: float = GIT_TIMEOUT, hide: tuple = (), options: list | None = None) -> str:
+    """Run git here. ``hide``: the update address and branch, when the command names them (for ``_scrub``).
+    ``options``: more ``-c`` settings for this one command (``signed_out``)."""
     # Both services run as root but the checkout belongs to the Pi's user, and git refuses to work in
     # someone else's repository ("dubious ownership") unless told that this one folder is trusted.
     try:
-        code, out, err = _run(["git", "-c", f"safe.directory={Path(repo).resolve()}", "-C", str(repo), *args], timeout)
+        code, out, err = _run(["git", "-c", f"safe.directory={Path(repo).resolve()}", *(options or []), "-C", str(repo), *args],
+                              timeout)
     except subprocess.TimeoutExpired:   # (never passed on: its text is the whole command line)
         raise GitError(f"the update source didn't answer in {timeout:g} seconds" if args[0] in REMOTE
                        else f"git {args[0]} didn't finish in {timeout:g} seconds") from None
@@ -258,17 +283,19 @@ def logged(error: BaseException) -> str:
 
 
 def version(repo: Path = REPO) -> dict | None:
-    """The running code's commit, date and subject, or None outside a git checkout."""
+    """The running code's commit and its date, or None outside a git checkout. (Never the commit's text: the
+    dashboard shows a version, a date and a short id.)"""
     try:
-        sha, date, subject = _git("log", "-1", "--format=%H%x00%cI%x00%s", repo=repo, timeout=10).split("\x00")
+        sha, date = _git("log", "-1", "--format=%H%x00%cI", repo=repo, timeout=10).split("\x00")
     except (RuntimeError, OSError, subprocess.TimeoutExpired, ValueError):
         return None
-    return {"commit": sha, "short": sha[:8], "date": date, "subject": subject}
+    return {"commit": sha, "short": sha[:8], "date": date}
 
 
 def latest(url: str, branch: str, repo: Path = REPO) -> str:
     """The newest commit on the update branch (asks the server; changes nothing here)."""
-    out = _git("ls-remote", "--", url, f"refs/heads/{branch}", repo=repo, timeout=LOOK_TIMEOUT, hide=(url, branch))
+    out = _git("ls-remote", "--", url, f"refs/heads/{branch}", repo=repo, timeout=LOOK_TIMEOUT, hide=(url, branch),
+               options=signed_out(url))
     if not out:
         raise GitError("the update source has no such branch")
     return out.split()[0]
@@ -320,13 +347,20 @@ def known(config: dict, data: Path = None, repo: Path = REPO) -> dict:
 
 
 def public(config: dict, data: Path = None, repo: Path = REPO) -> dict:
-    """The part of that anyone on the network may see (the hub's card, /api/public): which build is running,
-    whether a newer one is ready, and whether that one was tried and rolled back. Never where updates come
-    from, nor what the newer one is."""
+    """The part of that anyone on the network may see (the hub's card, /api/public): which build is running
+    (``build``, and ``date``: the day it was made, YYYY-MM-DD), whether a newer one is ready, and whether that one
+    was tried and rolled back. Never the update source's address, nor what the newer one is. (The version label beside it, bongo.version_label, carries the update
+    branch's name made safe to show, and nothing else of the source.)"""
     out = {}
     here = running_version(repo)
     if here:
         out["build"] = here["short"]
+        day = here.get("date")[:10] if isinstance(here.get("date"), str) else ""
+        try:
+            if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", day) and dt.date.fromisoformat(day).year >= 1970:
+                out["date"] = day   # the day it was made (YYYY-MM-DD): the hub shows it beside the version
+        except ValueError:
+            pass
     if busy(data):
         out["updating"] = True
     elif here and (seen := known(config, data, repo))["available"] is not None:
@@ -595,7 +629,9 @@ def apply(config: dict, repo: Path = REPO, data: Path = None, restart=restart_se
         try:
             if not cut_short:          # (its status says where it stopped: keep that until this run gets further)
                 report("fetching", f"Fetching {branch} from {shown(url)}", data=data, current=old)
-            _git("fetch", "--quiet", "--", url, f"refs/heads/{branch}", repo=repo, hide=(url, branch))
+            # (fetched by address, never through the checkout's own remote: a Matrix whose source changes needs nothing
+            # moved, its old commit stays here for the rollback, and the remote's own address and sign-in are never used)
+            _git("fetch", "--quiet", "--", url, f"refs/heads/{branch}", repo=repo, hide=(url, branch), options=signed_out(url))
             new = _git("rev-parse", "FETCH_HEAD", repo=repo)
             _noted(new, url, branch, data)   # what the Software card and the hub then say is ready (or isn't)
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:

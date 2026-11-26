@@ -11,8 +11,8 @@
   --page:#0B0C0E; --head:#0E1013; --card:#131519; --well:#08090A; --raise:#1A1D22; --line:#22262C; --line-2:#2C3139;
   --text:#ECEEF1; --soft:#C9CED6; --muted:#9AA1AC; --amber:#FFB547; --amber-hover:#FFCB7A; --ink:#1A1300;
   --amber-bg:#2A2114; --danger:#FF8A92; --good:#7BE0A6;
-  --ui: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+  --ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", "Liberation Sans", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace;
   color-scheme: dark;
 }
 * { box-sizing:border-box; }
@@ -48,7 +48,7 @@ main { padding:16px; display:grid; gap:16px; grid-template-columns:repeat(auto-f
 .btn:hover { background:var(--amber-hover); }
 .btn.plain { background:var(--raise); color:var(--text); border-color:var(--line-2); }
 .btn.plain:hover { background:#20242A; border-color:#3A3F47; }
-.soft { white-space:nowrap; } .ready { color:var(--amber); }
+.soft { overflow-wrap:anywhere; } .small-id { font-size:11px; opacity:.8; } .number { overflow-wrap:anywhere; } .tail, .meta > span:first-child { white-space:nowrap; } .ready { color:var(--amber); }
 .empty { color:var(--muted); grid-column:1 / -1; padding:40px 0; text-align:center; }
 footer { color:var(--muted); font-size:12px; text-align:center; padding:8px 16px 24px; }
 </style>
@@ -86,6 +86,23 @@ function ago(s) {
   return `${Math.round(s / 60)} min ago`;
 }
 
+/** A Matrix's version as people are shown it, in the plain style of its own Settings › Software card: "v1.0.0 · 25 Nov 2026"
+ *  and its short build small beside it. All of it came over the network from another device, so it is checked again
+ *  here (a label and a day of a known shape, nothing else) and escaped. A build that sends no label is older than the
+ *  public numbering: "older build". */
+const LABEL = /^v[0-9][0-9A-Za-z._-]{0,45}$/, DAY = /^\d{4}-\d{2}-\d{2}$/, BUILD = /^[0-9a-f]{7,12}$/;
+function versionText(m, off) {
+  const label = typeof m.label === 'string' && LABEL.test(m.label) ? m.label : null;
+  const day = typeof m.date === 'string' && DAY.test(m.date) ? new Date(`${m.date}T12:00:00Z`) : null;
+  const real = day && !Number.isNaN(day.getTime()) && day.getUTCFullYear() >= 1970 && day.toISOString().slice(0, 10) === m.date;   // (not 2026-02-30)
+  const date = real ? day.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }).replace(/\s/g, '\u00a0') : '';
+  const build = !off && typeof m.build === 'string' && BUILD.test(m.build) ? ` <span class="small-id">(${esc(m.build)})</span>` : '';
+  if (label) return `<span>${esc(label)}${date ? ` · ${esc(date)}` : ''}${build}</span>`;
+  // no label: a public number (the hub says so: older === false) is shown as it is; anything else, from before the public numbering or no number at all, is just "older build"
+  return m.older === false && typeof m.version === 'string' && m.version.length <= 20 && /^\d+(\.\d+){0,3}$/.test(m.version)
+    ? `<span class="number">${esc(`v${m.version}`)}${build}</span>` : `<span class="tail">· older build</span>`;
+}
+
 /** What a card says about its Matrix's software, and whether it gets an Update… button. A Matrix says for itself
  *  whether a new version is ready (update: true or false, from its own daily look). An older build says nothing:
  *  its card shows what it always did (the version, and a badge when another Matrix here runs a newer one) and has
@@ -93,10 +110,10 @@ function ago(s) {
 function software(m) {
   const off = !!m.error;
   // its build is its version, as its own Settings › Software names it; an older build only has the number it announces
-  const version = !off && m.build ? `<span title="Bongo Matrix ${esc(m.version || '?')}, build ${esc(m.build)}">${esc(m.build)}</span>` : `v${esc(m.version || '?')}`;
-  if (!off && m.updating === true) return { ready: false, line: `<span class="soft">${version} · <span class="ready">updating…</span></span>` };
-  if (!off && m.update === true) return { ready: true, line: `<span class="soft">${version} · <span class="ready">update available</span></span>` };
-  if (!off && m.update === false) return { ready: false, line: `<span class="soft">${version} · up to date</span>` };
+  const version = versionText(m, off);
+  if (!off && m.updating === true) return { ready: false, line: `<span class="soft">${version}<span class="tail"> · <span class="ready">updating…</span></span></span>` };
+  if (!off && m.update === true) return { ready: true, line: `<span class="soft">${version}<span class="tail"> · <span class="ready">update available</span></span></span>` };
+  if (!off && m.update === false) return { ready: false, line: `<span class="soft">${version}<span class="tail"> · up to date</span></span>` };
   return { ready: false, line: `<span>${version}</span>${m.behind ? '<span class="badge update">update available</span>' : ''}` };
 }
 /** Update… only opens that Matrix's own dashboard at Settings › Software, with the update ready to confirm: the hub

@@ -1,6 +1,6 @@
 """Pet modes as short scripts (walk to the bowl, eat, wash...), recorded into timelines.
 
-Ported from the remastered Cat 10 engine. A script moves the cat and plays reference
+Ported from the remastered v2 pet engine. A script moves the cat and plays reference
 animations; every step is recorded as a Shot, and a style plays the shots by the clock.
 """
 from __future__ import annotations
@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, replace
 
 from .art import H, W, Art
 
-# The front-floor layout every home and place has (Billy, 23 Nov: pets at the back looked huge): feet on
+# The front-floor layout every home and place has (so pets at the back never look huge): feet on
 # rows 25-30, the bed bottom-left, the floor bowl front right (x 52-61, rows 25-30), the ball's home in the
 # middle, furniture only on the back wall.
 BED = (14, 29)        # sitting, lying or curled-up pet lands in the bed (the flamingo sleeps standing here)
@@ -36,7 +36,7 @@ class Stage:
     depth: bool = True        # she shrinks as she goes back up the floor
 
     def scale(self, y) -> float:
-        """How big she is drawn with her feet on row ``y`` (Billy, 24 Nov; council 24 Nov: the two front rows,
+        """How big she is drawn with her feet on row ``y`` (the two front rows,
         where she sleeps, sits and begs, are both full size): 100% on rows 29-30 of a 64x32 room (the floor's
         two front rows), shrinking from row 28 to 65% at row 17, and in between in proportion."""
         if not self.depth:

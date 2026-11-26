@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from bongo import daylight, durable, media, paths, pets
+from bongo import daylight, durable, fonts, media, paths, pets
 from bongo.module import Context, Module
 from bongo.player import Entry
 from bongo.safe_area import SafeArea
@@ -370,11 +370,12 @@ def tidy(config: dict, modules: dict[str, Module], path: Path | None = None) -> 
                 and not any(isinstance(e, dict) and e.get("module") == "splash" for e in playlist):
             playlist.insert(0, {"module": "splash", "enabled": True})
             notes.append("splash: now a playlist item; added one at the top of the playlist")
+    from bongo import update   # (Python's own library only)
     for screen in ("splash", "sleep"):
         notes += _screen_files(config.get(screen), screen)
     if all(isinstance(config.get(key) or [], list) for key in ("playlist", "overlays")):   # (else validate() says so)
         notes += pets.adopt(config)  # before the Pet entries lose their own name
-    notes += pets.migrate(config)    # Last Tick's cat and bunny are gone: ours instead
+    notes += pets.migrate(config)    # the old pack's cat and bunny are gone: ours instead
     off = config.get("modules_off")
     if isinstance(off, list) and any(m not in modules for m in off):   # a module that's no longer installed
         config["modules_off"] = [m for m in off if m in modules]
@@ -445,6 +446,10 @@ def tidy(config: dict, modules: dict[str, Module], path: Path | None = None) -> 
                             settings[name] = kept
                         else:
                             del settings[name]
+                elif offered is not None and isinstance(value, str) and value not in offered \
+                        and fonts.REPLACED.get(value) in offered:   # a removed font: the nearest one kept
+                    settings[name] = fonts.REPLACED[value]
+                    notes.append(f"{key}[{i}] {entry['module']}: {name}: the {value} font is gone, now {settings[name]}")
                 elif offered is not None and isinstance(value, str) and value not in offered:
                     del settings[name]
                     notes.append(f"{key}[{i}] {entry['module']}: {name}: {value!r} is gone, back to the default")

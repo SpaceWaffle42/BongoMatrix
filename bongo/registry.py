@@ -6,6 +6,7 @@ fails to import is logged and skipped so it can never take the others down.
 from __future__ import annotations
 
 import importlib
+import re
 import logging
 import pkgutil
 
@@ -26,9 +27,12 @@ def discover(strict: bool = False) -> dict[str, Module]:
                 raise TypeError("MODULE is not a bongo.module.Module")
             if module.id in found:
                 raise ValueError(f"duplicate module id {module.id!r}")
-        except Exception:
+        except Exception as error:
             if strict:
                 raise
+            if isinstance(error, ValueError) and re.search(r"settings_page|page_links", str(error)):
+                log.warning("skipping module %s: %s", info.name, error)   # a bad declaration is said, not a stack trace
+                continue
             log.exception("skipping module %s", info.name)
             continue
         found[module.id] = module

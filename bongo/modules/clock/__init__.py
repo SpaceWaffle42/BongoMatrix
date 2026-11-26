@@ -36,6 +36,7 @@ MODULE = Module(
         "tree": SeasonalTree,
     },
     check=check,
+    page_links={"pet": "pet"},   # the Pet style shows the pet, whose page is the Pet module's
     migrate=lava_migrate,
     choice_names={"tree": {"labels": {"apple": "Apple tree", "oak": "Oak"}},
                   "hemisphere": {"labels": {"auto": "From the Matrix's location", "north": "Northern", "south": "Southern"}},

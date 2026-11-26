@@ -51,7 +51,7 @@ export function importBox(done) {
   let place = null;   // { url, said, token: '' } for the link in the box
   function askLink(problem = '', value = '', needsToken = false) {
     title.textContent = 'Import a module';
-    const url = h('input', { class: 'input mono', id: 'import-url', type: 'text', inputmode: 'url', placeholder: 'https://github.com/someone/their-module',
+    const url = h('input', { class: 'input mono', id: 'import-url', type: 'text', inputmode: 'url', placeholder: 'https://github.com/user/repo',
       spellcheck: 'false', autocomplete: 'off', autocapitalize: 'off', value });
     const file = h('input', { type: 'file', accept: '.zip,application/zip', class: 'sr-only', id: 'import-zip', tabindex: '-1' });
     const pick = h('button', { type: 'button', class: 'link' }, 'upload a .zip');

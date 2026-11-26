@@ -28,9 +28,9 @@ from pathlib import Path
 from bongo import paths
 
 BUILT_IN = Path(__file__).resolve().parents[1] / "resources" / "pet"
-# the dog's breeds, each its own kind (Settings > Pet shows them under Dog, after Biscuit)
+# the dog's breeds, each its own kind (the Pet page shows them under Dog, after Biscuit)
 DOGS = ["jackrussell", "spaniel", "dachshund", "corgi", "frenchie", "pug", "shepherd", "cockapoo"]
-# the animals in the order Settings > Pet shows them
+# the animals in the order the Pet page shows them
 ORDER = ["cat", "bunny", "dog", *DOGS, "hamster", "lizard", "flamingo", "sheep", "monster", "rock"]
 
 
@@ -100,7 +100,7 @@ def default_name(kind: str) -> str:
     return name if isinstance(name, str) and NAME.fullmatch(name) else Pet.name
 
 
-GROUPS = {k: "dog" for k in DOGS}                              # the dog's other shapes: Settings shows them under Dog
+GROUPS = {k: "dog" for k in DOGS}                              # the dog's other shapes: the Pet page shows them under Dog
 
 
 def accessory(kind: str) -> str:
@@ -109,12 +109,12 @@ def accessory(kind: str) -> str:
 
 
 def title(kind: str) -> str:
-    """What Settings > Pet calls the animal ("Jack Russell")."""
+    """What the Pet page calls the animal ("Jack Russell")."""
     return _index(kind).get("title") or kind.replace("_", " ").title()
 
 
 def group(kind: str) -> str:
-    """The animal a kind is a shape of (Settings > Pet: pick the animal, then its shape, then its colour)."""
+    """The animal a kind is a shape of (the Pet page: pick the animal, then its shape, then its colour)."""
     return GROUPS.get(kind, kind)
 
 
@@ -126,6 +126,24 @@ def shape(coat: str) -> str:
 def kinds() -> list[str]:
     """The animals there is art for."""
     return kinds_found() or ["cat"]
+
+
+# The rooms the pet's home can be, by size: what the Pet page's preview offers ("Small / Medium / Large") and the
+# place each one is drawn in (bongo/modules/pet/places.py: the house is 64x32; rooms.py: 96x48 and 128x64).
+# tests/test_pet_page.py checks these still match the modules' own rooms.
+ROOM_SIZES = (
+    {"size": "small", "label": "Small", "width": 64, "height": 32, "place": "house"},
+    {"size": "medium", "label": "Medium", "width": 96, "height": 48, "place": "living_room"},
+    {"size": "large", "label": "Large", "width": 128, "height": 64, "place": "playroom"},
+)
+
+
+def room_sizes(kind: str, panel: tuple[int, int] = (64, 32)) -> list[dict]:
+    """The room sizes to offer for this animal on a panel of this size. Today that is all of them for everyone:
+    no animal is kept out of a size, and any room can be shown on any panel (a room bigger than the panel is
+    followed by the view; a smaller one fills part of it). A limit, if one is ever decided, goes here and nowhere
+    else, so the dashboard offers exactly what works."""
+    return [dict(r) for r in ROOM_SIZES]
 
 
 def of(config: dict) -> Pet:
@@ -176,11 +194,11 @@ def adopt(config: dict) -> list[str]:
                 name = entry["settings"].get("name")
                 if isinstance(name, str) and NAME.fullmatch(name.strip()):
                     config["pet"] = {"kind": Pet.kind, "name": name.strip()}
-                    return [f"pet: {name.strip()} is now the Matrix's pet (set in Settings > Pet)"]
+                    return [f"pet: {name.strip()} is now the Matrix's pet (set on the Pet page)"]
     return []
 
 
-# -- Last Tick's pack art, removed 24 Nov 2026 ------------------------------------------------------------------
+# -- the old pet pack's art, removed 24 Nov 2026 ----------------------------------------------------------------
 PACK = {"packcat": "cat", "packbunny": "bunny"}    # the pack's kinds -> ours
 PACK_NAMES = {"packbunny": "Bun"}                   # (an unnamed pack bunny was called Bun; the pack cat Mochi, as ours)
 OUR_COAT = re.compile(r"[a-z_]+\.[a-z_]+")         # ours are "shape.colour"; the pack's "10", "1.3"
@@ -193,7 +211,7 @@ DONE = ".pack-art-removed"                            # in data/: written once n
 
 
 def migrate(config: dict) -> list[str]:
-    """At config load: a pet of Last Tick's (``packcat`` / ``packbunny``, or a ``cat`` / ``bunny`` saved with one
+    """At config load: a pet from the old pack (``packcat`` / ``packbunny``, or a ``cat`` / ``bunny`` saved with one
     of the pack's coat ids, which aren't "shape.colour") becomes our own cat or bunny in its default coat, with
     the same name; its collar and dress_up stay where ours has them. A cat or bunny's collar colour only the pack
     had goes too. Running it again changes nothing."""
@@ -215,7 +233,7 @@ def migrate(config: dict) -> list[str]:
     if "name" not in rule and old in PACK_NAMES:
         new["name"] = PACK_NAMES[old]
     config["pet"] = new
-    return [f"pet: Last Tick's art is gone; {new.get('name', Pet.name)} is now our own {kind} in its default colour"]
+    return [f"pet: the old pet pack's art is gone; {new.get('name', Pet.name)} is now our own {kind} in its default colour"]
 
 
 def _pack_upload(f: Path) -> bool:
@@ -265,12 +283,12 @@ def remove_pack_files(data: Path | None = None, built: Path | None = None) -> li
             pass                                      # gone, or something else is in it: left as it is
     notes = []
     if gone:
-        notes.append(f"pet: removed Last Tick's pack art ({len(gone)} file{'s' * (len(gone) != 1)}: "
+        notes.append(f"pet: removed the old pet pack's art ({len(gone)} file{'s' * (len(gone) != 1)}: "
                      f"{', '.join(gone[:6])}{', ...' if len(gone) > 6 else ''})")
         log.warning(notes[-1])
     tried = data / (DONE + ".tried")
     if failed:
-        notes.append(f"pet: couldn't remove Last Tick's art from {len(failed)} place{'s' * (len(failed) != 1)} "
+        notes.append(f"pet: couldn't remove the old pet pack's art from {len(failed)} place{'s' * (len(failed) != 1)} "
                      f"(first: {failed[0]}); trying again next start")
         log.log(logging.DEBUG if tried.exists() else logging.WARNING, notes[-1])
     try:

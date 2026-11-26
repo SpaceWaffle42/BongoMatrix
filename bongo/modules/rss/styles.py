@@ -2,11 +2,14 @@
 ``summary_colour`` everywhere, so the two never blur together."""
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from PIL import Image, ImageDraw
 
 from bongo.fonts import middle
 from bongo.module import Style
+from bongo.player import OVERRUN
 from bongo.scroll import HOLD, Scrolls
 
 from . import data
@@ -374,12 +377,14 @@ class Story(Headline):
     """v2's layout: the headline on a row of its own, and the story text below it in its own colour.
     Both start together, each at its own speed: the headline, if it's too wide, slides across once (held at
     its first letter first) at ``scroll_speed``; the text moves up a line at a time at ``text_speed``, each
-    line given time to be read. The story stays up until both are done."""
+    line given time to be read. A story that scrolls goes through ``PASSES`` times, and the headline is always
+    done before the story is: nobody waits on a headline with no story left to read."""
     # stop_at_each_line: the text moves up a line and stops while it's read (off: it glides up steadily,
     # taking the same time overall, and stops once the last lines are up)
     defaults = {"scroll_speed": 12, "text_speed": 50, "stop_at_each_line": True}
     basic = ("text_speed", "stop_at_each_line")   # (shown with the main settings, not under More)
     GAP = 16    # pixels between a sliding headline and its repeat
+    PASSES = 3  # how many times a story that has to scroll goes through
 
     def setup(self):
         super().setup()
@@ -402,9 +407,20 @@ class Story(Headline):
             return text, [], max(HOLD, sum(len(l) for l in text) * READ * pace)
         return (text, *crawl(text, self.fit, pace=pace))
 
-    def seconds(self, item):
+    def passes(self, item):
+        """(how many times the story goes through, seconds one pass takes). A story that scrolls goes through
+        ``PASSES`` times; one that fits goes through once, and as often more as the headline needs to finish
+        (a pass later than the headline's last letter, so the story is still being read when it stops)."""
+        one = self.plan(item)[2] + HOLD
         slide = self.slide(item)
-        return max(self.settings["rotate_seconds"], (HOLD + slide + 1.0) if slide else 0.0, self.plan(item)[2] + HOLD)
+        need = math.ceil(((HOLD + slide + 1.0) + HOLD) / one) if slide else 1
+        # (a story so long that three passes would pass the player's OVERRUN backstop goes through as often as fits)
+        wanted = max(1, min(self.PASSES, int(OVERRUN // one))) if self.plan(item)[1] else 1
+        return max(wanted, need), one
+
+    def seconds(self, item):
+        n, one = self.passes(item)
+        return max(self.settings["rotate_seconds"], n * one)
 
     def draw(self, items, now):
         if not any(self.summary(i) for i in items):  # nothing but headlines: the card shows them best
@@ -425,6 +441,8 @@ class Story(Headline):
         text, moves, _ = self.plan(item)
         if not text:
             return img
+        n, one = self.passes(item)
+        t -= min(int(t // one), n - 1) * one            # each pass starts the text again from its first lines
         top = self.row + 1
         area = img.crop((0, top, w, min(h, top + self.fit * self.pitch)))
         offset = climbed(moves, t, self.pitch) if self.settings["stop_at_each_line"] else glided(moves, t, self.pitch)

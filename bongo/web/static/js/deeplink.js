@@ -25,7 +25,7 @@ export function forget(loc = location, hist = history) {
 export function ready(info, name) {
   const v = info?.version, known = info?.known;
   if (!v?.short || known?.available !== true || typeof known.latest !== 'string' || RUNNING.has(info.status?.state)) return null;
-  return { line: `${name || 'This Matrix'} is on ${v.short}. ${known.latest.slice(0, 8)} is ready.`,
+  return { line: `${name || 'This Matrix'} is on ${info.label || 'this version'} (${v.short}). A new version (${known.latest.slice(0, 8)}) is ready.`,
     note: "The panel and this page go quiet for about a minute. If the new version won't start, it goes back to the old one by itself." };
 }
 

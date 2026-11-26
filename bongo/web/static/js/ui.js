@@ -85,6 +85,22 @@ export function ago(iso) {
   return new Date(t).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
+/** A date as the dashboard shows one (25 Nov 2026, in the viewer's own locale, with no break inside it).
+ *  A string is a commit's date: its own calendar day (the first ten characters) is shown, whatever the time zone
+ *  of the viewer; a number or Date is shown in the viewer's zone. '' when it isn't a date. */
+export function shortDate(when) {
+  if (when === null || when === undefined || when === '') return '';
+  const day = typeof when === 'string' ? /^([0-9]{4})-([0-9]{2})-([0-9]{2})/.exec(when) : null;
+  if (typeof when === 'string' && !day) return '';
+  if (day && +day[1] < 1970) return '';  // Date.UTC would read years 0-99 as 19xx
+  const at = day ? new Date(Date.UTC(+day[1], +day[2] - 1, +day[3], 12)) : new Date(when);
+  if (Number.isNaN(at.getTime())) return '';
+  // a day that isn't on the calendar (2026-02-30) or is before 1970 is no date: the same rule as the hub's (bongo/hub.py valid_day)
+  if (day && (at.getUTCFullYear() < 1970 || at.getUTCMonth() !== +day[2] - 1 || at.getUTCDate() !== +day[3])) return '';
+  return at.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric', ...(day ? { timeZone: 'UTC' } : {}) })
+    .replace(/\s/g, '\u00a0');
+}
+
 export const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 export const store = {

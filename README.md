@@ -1,13 +1,15 @@
-# Bongo Matrix v3
+# Bongo Matrix
 
 <img src="bongo/web/static/logo.svg" alt="The Bongo Matrix logo: a round wall of coloured blocks" width="96">
 
 A Raspberry Pi and a 64×32 HUB75 RGB LED panel, turned into a modular display.
 
-v3 is a ground-up rewrite. Everything up to v2 is frozen on the
+This version (the project's third iteration, internally "v3") is a ground-up rewrite. Everything up to v2 is frozen on the
 [`archive/v2`](../../tree/archive/v2) branch. The guiding rule for v3 is
 **modularity with as little code as possible**: the core knows how to play a
 playlist, and every screen lives in its own folder under `bongo/modules/`.
+
+Licence: MIT, see [LICENSE.md](LICENSE.md).
 
 ## How it fits together
 
@@ -50,7 +52,7 @@ day). The one on the panel finishes its seconds, the sleep hours still win, and 
 the panel is blank until something is. The dashboard warns about such a gap before you apply it.
 
 See [docs/MODULES.md](docs/MODULES.md) to write a module and
-[docs/ROADMAP.md](docs/ROADMAP.md) for the remaster plan.
+[docs/NETWORK.md](docs/NETWORK.md) for how Matrices find each other and share their version.
 
 ## Modules
 
@@ -66,7 +68,7 @@ See [docs/MODULES.md](docs/MODULES.md) to write a module and
 | Announcements | banner, card, flash | Notices scheduled by date, weekday and hour; several rotate. |
 | News | ticker, headline, picture | Headlines from RSS/Atom feeds, newest first; `picture` shows the story's thumbnail beside it. A feed must be an http(s) address that really serves RSS or Atom; the dashboard checks new feeds when you save. Each feed can have word filters: only stories that mention, and never show stories that mention, the words or phrases you list. |
 | Calendar | Today: page, desk, date_line, week · Month: month, numbers, dots, year · Progress: progress, rings, weeks, percent · Countdown: countdown_days, countdown_clock, countdown_flip, countdown_ring, countdown_tearoff | One list of your dates (once, every year or a holiday; time, message, icon, colour) shown on the calendar looks; the countdowns count down to the soonest (or, with none, the next ticked holiday). The Countdown module moved in on 12 Nov 2026: saved entries move over by themselves. |
-| Pet | life, idle, eating, napping, playing, zoomies, … | Mochi the cat (your Cat 10 art) in her room. Life plays the ticked modes through the day; the `wander` overlay walks her across other screens. Name her in Settings. |
+| Pet | life, idle, eating, napping, playing, zoomies, … | Mochi the cat, or one of the other animals, in her home. Life plays the ticked modes through the day; the `wander` overlay walks her across other screens. Pick her and name her on the Pet page (Settings > Modules > Pet). |
 | Sky | moon, sun | Moon phase and next full/new moon; today's sun arc with sunrise and sunset. |
 
 ## Try it without a panel
@@ -84,16 +86,20 @@ Previews are LED-look GIFs rendered by exactly the code that drives the panel.
 
 1. Install [hzeller/rpi-rgb-led-matrix](https://github.com/hzeller/rpi-rgb-led-matrix)
    and its Python bindings so the venv's Python can `import rgbmatrix`.
+   That driver is a separate program under the GPL-2.0 licence and is not part of this
+   repository, which is MIT. Bongo Matrix only loads it when it runs on a panel; the previews
+   and the tests never need it. Anyone who passes on a device or image that has the driver built
+   in has to include the driver's licence and offer its source, as its licence says.
 2. For video in the Media module: `sudo apt install ffmpeg`.
 3. Copy `config.example.json` to `data/config.json` and edit the playlist.
    An empty playlist plays every module in its default style.
 4. `sudo ./venv/bin/python -m bongo run`, or install `deploy/bongo-matrix.service`.
 
-A display only needs the `prod_device` branch: the same code without tests, tools, docs or the
-dashboard demo (`tools/prod_tree.py` decides what goes in). Install it as a git checkout:
+A display needs only the public build on GitHub: the code without tests, tools, the roadmap or the dashboard
+demo. Install it as a git checkout:
 
 ```bash
-git clone -b prod_device http://gitlab.home.lan/matrix_display/bongo_matrix.git /home/admin/matrix
+git clone -b main https://github.com/SpaceWaffle42/BongoMatrix /home/admin/matrix
 ```
 
 ### Wi-Fi and finding it
@@ -106,7 +112,9 @@ and every Matrix on the network is listed at `http://matrix.local`. See
 
 ### Updates
 
-Settings → Software shows the running version, checks for a new one and pulls it. The
+The public version number is kept in `bongo/__init__.py` and bumped by hand at a release (there is no automated release process). A Matrix that updates from any branch other than `main` adds the branch to the number it shows: `v1.0.0.cat_tree`. Builds from before the public numbering stamped `3.x`; those count as older than `1.0.0`. An older hub (the 3.x numbering) therefore sees v1 Matrices as older, and shows "update available" for them until it is updated.
+
+Settings → Software shows the running version (its label: `v1.0.0`, or `v1.0.0.<branch>` when updates come from a branch other than `main`, with the date and short id of the commit), checks for a new one and pulls it. The
 display service can only write to `data/`, so it never replaces its own code: it leaves a
 request in `data/update-request.json`, and the updater (`deploy/bongo-update.path` +
 `deploy/bongo-update.service`) fetches the branch, installs it, reinstalls packages if
@@ -122,12 +130,13 @@ sudo cp deploy/bongo-update.path deploy/bongo-update.service /etc/systemd/system
 sudo systemctl daemon-reload && sudo systemctl enable --now bongo-update.path
 ```
 
-Updates come from `prod_device` on the GitLab above. Settings → Software → Advanced can point a
-display somewhere else (for example the public GitHub copy); it warns first, because whatever
-is at that address runs on the display. `python -m bongo update` checks from the command line.
+Updates come from `main` of the public build above (https://github.com/SpaceWaffle42/BongoMatrix). No sign-in
+is needed or sent: a Matrix's own git settings never give that address a token. Settings → Software → Advanced can
+point a display somewhere else (your own fork, say); it warns first, because whatever is at that address runs on
+the display. `python -m bongo update` checks from the command line.
 
-`prod_device` is rebuilt by CI after every green `main` (`tools/publish_prod.sh`), once a project
-access token with `write_repository` is saved as the masked CI/CD variable `PROD_PUSH_TOKEN`.
+Modules made for the Matrix by its author, to import from Settings → Modules → Import:
+https://github.com/SpaceWaffle42/BongoMatrix-imports.
 
 ### Back up and restore
 

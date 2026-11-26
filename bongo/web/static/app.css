@@ -1,9 +1,6 @@
 /* Bongo Matrix v3 dashboard. Tokens from the approved design. */
-/* The dashboard's three fonts, served by the Matrix itself (fonts/, with their licence), so the page looks
-   the same with no internet. Each file is one variable font: every weight from 400 to 700. */
-@font-face { font-family: Inter; src: url("fonts/inter.woff2") format("woff2"); font-weight: 400 700; font-style: normal; font-display: swap; }
-@font-face { font-family: "Space Grotesk"; src: url("fonts/space-grotesk.woff2") format("woff2"); font-weight: 400 700; font-style: normal; font-display: swap; }
-@font-face { font-family: "JetBrains Mono"; src: url("fonts/jetbrains-mono.woff2") format("woff2"); font-weight: 400 700; font-style: normal; font-display: swap; }
+/* Fonts: the ones already on the phone or computer (system font stacks), so the page needs nothing from the
+   internet and ships no font files. Text that stands for the panel is drawn from its pixels, never a font. */
 
 :root {
   --page: #0B0C0E; --head: #0E1013; --card: #131519; --card-2: #181B1F; --well: #08090A; --raise: #1A1D22;
@@ -13,9 +10,9 @@
   --danger: #FF8A92; --danger-bg: #2A1517; --danger-line: #5A2A2E;
   --warn: #FACC15; --info: #9FC2FF; --ok: #4ADE80;
   --r-s: 0; --r-m: 0; --r-l: 0;  /* sharp corners everywhere */
-  --ui: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --head-font: "Space Grotesk", var(--ui);
-  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", "Liberation Sans", Arial, sans-serif;
+  --head-font: var(--ui);
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace;
   color-scheme: dark;
 }
 *, *::before, *::after { box-sizing: border-box; }
@@ -324,7 +321,7 @@ body.drag-active { user-select: none; -webkit-user-select: none; }
 .preview-note .btn { flex: none; }
 .crumb { display: inline-flex; align-items: center; gap: 4px; min-height: 40px; color: var(--muted); text-decoration: none; }
 .crumb:hover { color: var(--text); }
-.crumb-sep { color: #4A505A; }
+.crumb-sep { color: #8A919C; }
 .editor-grid { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; }
 .editor-form { flex: 3 1 440px; }
 .editor-preview { flex: 2 1 360px; min-width: 0; position: sticky; top: 88px; display: flex; flex-direction: column; gap: 12px; }
@@ -642,7 +639,7 @@ body[data-route="/animator"] .view > .stack { flex: 1; gap: 0; min-height: 0; }
   body[data-route="/animator"] .view { padding: 0; }
 }
 
-/* Settings > Pet: one button per coat, showing its face */
+/* The Pet page: one button per coat, showing its face */
 .coat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: 6px; max-height: 270px; overflow-y: auto; padding: 2px; }
 .coat { display: grid; place-items: center; aspect-ratio: 1; padding: 4px; border: 1px solid var(--line-2); background: var(--page); color: var(--text); cursor: pointer; }
 .coat img { width: 100%; image-rendering: pixelated; }
@@ -654,6 +651,95 @@ body[data-route="/animator"] .view > .stack { flex: 1; gap: 0; min-height: 0; }
 .pet-tile-blank { width: 40px; height: 40px; }
 .pet-tile:hover { border-color: var(--muted); }
 .pet-tile[aria-checked="true"] { border-color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); background: var(--amber-bg); }
+
+/* The Pet page (js/petpage.js) and the editor's "Your pet" card: a few pieces on the dashboard's own tokens */
+.shared-tag { background: var(--amber-bg); color: var(--amber-hover); }
+
+/* the editor's "Your pet" line: the button goes under the words on a phone */
+.your-pet-line { flex-wrap: wrap; }
+@media (max-width: 719.98px) { .your-pet-line > .btn { flex: 1 0 100%; } }
+
+/* Your pet: the seasonal-outfits switch reads left to right, like every other switch */
+.pet-page .switch, .pet-page .switch-label { text-align: left; justify-content: flex-start; }
+@media (max-width: 719.98px) { .pet-page .pet-tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+
+/* the one preview: real panel size, room size under it. --cap: the most height the picture may take (a tall 64x64 panel
+   is capped, its width follows its shape); --ratio: the panel's width over its height, set by the page */
+.pet-preview { --cap: min(40vh, 340px); --ratio: 2; }
+.pet-preview .led-frame { display: flex; justify-content: center; }
+.pet-preview .led-canvas { width: min(100%, calc(var(--cap) * var(--ratio))); margin: 0 auto; }
+.field-head-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 13px; color: var(--soft); }
+.seg button:disabled { opacity: .4; cursor: not-allowed; }
+.seg button small { display: block; font: 11px var(--mono); color: var(--faint); }
+.seg button[aria-pressed="true"] small { color: var(--amber-hover); }
+.pet-page .tag-gap { margin-left: 8px; }
+.pet-page .field-error { margin-top: -2px; }
+.pet-page .input.bad, .pet-page .input[aria-invalid="true"] { border-color: var(--danger); box-shadow: 0 0 0 1px var(--danger); }
+@media (pointer: coarse) { .pet-page .leave-ask .btn { min-height: 44px; } }
+/* Between a phone and the width where the form and the preview fit side by side (about 1110 px) the preview is pinned
+   above the form, as on a phone. (A short screen, a phone on its side, has its own layout below.) */
+@media (min-width: 720px) and (max-width: 1119.98px) and (min-height: 521px) {
+  .pet-page .editor-preview { order: -1; position: sticky; top: 64px; z-index: 5; flex-basis: 100%; }
+  .pet-page .editor-preview .card { padding: 10px; background: var(--card); }   /* opaque: the form scrolls under it */
+  .pet-page .editor-preview .led-frame { padding: 6px; }
+  .pet-page .editor-form { flex-basis: 100%; }
+}
+@media (max-width: 719.98px), (min-width: 720px) and (max-width: 1119.98px) and (min-height: 521px) {   /* pinned above the form: a third of the screen at most, the picture and the room sizes */
+  .pet-page .editor-preview { --cap: max(56px, calc(30vh - 80px)); }
+  .pet-page .editor-preview .card { gap: 6px; }
+  .pet-page .editor-preview .preview-head, .pet-page .editor-preview .field-head-row, .pet-page .editor-preview .preview-why,
+  .pet-page .editor-preview .room-note { display: none; }
+  .pet-page .editor-preview .seg button { min-height: 32px; padding: 4px 6px; }
+  /* what you scroll to clears the pinned preview above and the tab bar below */
+  .pet-page .editor-form button, .pet-page .editor-form input, .pet-page .editor-form select, .pet-page .editor-form label, .pet-page .editor-form summary,
+  .pet-page .editor-form a { scroll-margin: calc(30vh + 90px) 0 100px; }
+}
+@media (min-width: 720px) and (max-height: 520px) {   /* a phone on its side: the form beside a pinned preview, the menu a rail of icons */
+  body[data-route^="/modules/"] .sidenav { height: auto; width: 64px; padding: 20px 8px; }
+  body[data-route^="/modules/"] .side-link { justify-content: center; padding: 8px 0; position: relative; }
+  body[data-route^="/modules/"] .side-link > span:not(.ico) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .pet-page .editor-grid { flex-wrap: nowrap; gap: 16px; }
+  .pet-page .editor-form { flex: 1 1 0; min-width: 0; }
+  .pet-page .editor-preview { flex: 0 0 min(300px, 42%); top: 64px; --cap: max(56px, calc(100vh - 250px)); }
+  .pet-page .editor-preview .card { gap: 6px; padding: 10px; }
+  .pet-page .editor-preview .preview-head, .pet-page .editor-preview .field-head-row, .pet-page .editor-preview .preview-why { display: none; }
+  .pet-page .editor-preview .seg button { min-height: 32px; padding: 4px 6px; }
+  .pet-page .editor-form button, .pet-page .editor-form input, .pet-page .editor-form select, .pet-page .editor-form summary, .pet-page .editor-form a { scroll-margin: 90px 0 24px; }
+}
+
+/* Where it appears */
+.where-list { display: flex; flex-direction: column; }
+.where-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); min-width: 0; }
+.where-row:first-child { border-top: 0; }
+.where-row .led-frame.mini { padding: 3px; flex: none; }
+.where-row .led-canvas.mini { width: 64px; height: auto; }
+.where-row .tag { align-self: flex-start; margin-top: 2px; }
+.where-fold > summary { list-style: none; display: flex; justify-content: space-between; align-items: center; gap: 8px; cursor: pointer; min-height: 40px; }
+.where-fold > summary::-webkit-details-marker { display: none; }
+.where-desk { display: block; } .where-phone { display: none; }   /* (not .phone-only: the Now page's helper is another thing) */
+@media (max-width: 719.98px) { .where-desk { display: none; } .where-phone { display: block; } }
+
+/* coming soon: the shape of the card, nothing to press yet */
+.soon { border-style: dashed; }
+.soon-tag { background: transparent; border: 1px dashed var(--line-2); color: var(--faint); }
+.soon-body { pointer-events: none; display: flex; flex-direction: column; gap: 12px; }
+/* the controls are dimmed and dashed; the words on them are not: they stay readable (at least 3:1) */
+.soon-body .switch-track, .soon-body .need-bar { opacity: .6; }
+.soon-body .slot { border-style: dashed; color: var(--muted); }
+.soon-body .switch { opacity: 1; color: var(--muted); }
+.soon-body button:disabled { opacity: 1; color: var(--muted); border-style: dashed; }
+.need-bars { display: grid; grid-template-columns: auto 1fr; gap: 6px 10px; align-items: center; font-size: 13px; color: var(--soft); }
+.need-bar { height: 8px; background: var(--well); border: 1px solid var(--line-2); }
+.need-bar > span { display: block; height: 100%; background: var(--muted); }
+.slot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 6px; }
+.slot { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-height: 64px; padding: 6px; border: 1px solid var(--line-2); background: var(--page); color: var(--soft); font-size: 13px; }
+.slot small { color: var(--muted); font-size: 11px; }
+.visit-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.visit-row:first-child { border-top: 0; }
+
+/* Settings > Modules: the button to a module's own page */
+.module-page { align-items: center; margin-top: 4px; }
+.module-page .btn .ico { margin-left: 2px; }
 
 /* Fingers, not a mouse: small text links and the drag handle get a target of at least 40 px, without
    moving anything (the extra is padding inside the line, taken back by a negative margin). */
@@ -727,3 +813,5 @@ body[data-route="/animator"] .view > .stack { flex: 1; gap: 0; min-height: 0; }
 .left-out { margin: 0; padding-left: 18px; max-height: 260px; overflow: auto; color: var(--soft); }
 .left-out li { margin: 3px 0; overflow-wrap: anywhere; }
 .left-out .tag { display: inline-block; max-width: 100%; white-space: normal; overflow-wrap: anywhere; vertical-align: baseline; }   /* goes to the next line whole */
+.pet-page .leave-ask { flex-wrap: wrap; align-items: center; scroll-margin: 40vh 0; }
+.pet-page .leave-ask[hidden] { display: none; }

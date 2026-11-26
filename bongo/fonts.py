@@ -9,6 +9,27 @@ from PIL import Image
 
 FONT_DIR = Path(os.environ.get("BONGO_FONTS", Path(__file__).resolve().parent.parent / "resources" / "fonts"))
 
+# Fonts removed on 25 Nov 2026 because their licences aren't MIT or public domain, and the kept font that
+# takes each one's place: the nearest in size, so a screen's layout hardly moves. A saved setting that
+# names one is changed to its replacement when the config loads (config.tidy), and a font asked for by
+# its old name (an imported module, say) gets the replacement too.
+REPLACED = {
+    "clR6x12": "6x12",     # the same 6 x 12 cell, with the same 7-row capitals
+    "helvR12": "6x13",     # 9-row capitals, about as wide
+    "texgyre-27": "10x20",  # the biggest font left
+}
+
+
+def renamed(value):
+    """``value`` (settings, a playlist, a whole config sent by a page) with every removed font named in a font
+    setting changed to its replacement: a page left open through the update still holds the old names."""
+    if isinstance(value, dict):
+        return {k: (REPLACED.get(v, v) if isinstance(v, str) and "font" in str(k) else renamed(v))
+                for k, v in value.items()}
+    if isinstance(value, list):
+        return [renamed(v) for v in value]
+    return value
+
 
 class Glyphs(dict):
     """A font's glyphs by character code: (advance, x offset, rows above the baseline, mask). A glyph's
@@ -100,7 +121,10 @@ class Fonts:
         self.directory = Path(directory)
 
     def __call__(self, name: str) -> BdfFont:
-        return _load(self.directory / f"{name}.bdf")
+        path = self.directory / f"{name}.bdf"
+        if name in REPLACED and not path.is_file():
+            path = self.directory / f"{REPLACED[name]}.bdf"
+        return _load(path)
 
 
 @lru_cache(maxsize=None)

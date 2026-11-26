@@ -22,6 +22,7 @@ the cards with fake peers and no network.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import ipaddress
 import json
 import logging
@@ -68,11 +69,61 @@ def elect(peers: list[Peer], alive=None) -> Peer | None:
     return None
 
 
-def version_key(v: str) -> tuple:
-    parts = []
-    for bit in str(v).replace("-", ".").split("."):
-        parts.append((0, int(bit)) if bit.isascii() and bit.isdigit() else (1, bit))
-    return tuple(parts)
+def version_tier(v) -> int:
+    """0: no number at all ("", None, "abc", "v1.0.0"); 1: legacy; 2: a public number."""
+    nums = _numbers(v)
+    return 0 if not nums else 1 if nums[0] == 3 else 2
+
+
+MAX_STAMP = 64    # a version stamp longer than this, or a number of more than MAX_DIGITS digits, isn't a version
+MAX_DIGITS = 9
+
+
+def _numbers(v) -> tuple:
+    text = str(v)
+    if len(text) > MAX_STAMP:
+        return ()
+    out = []
+    for bit in text.replace("-", ".").split("."):   # the leading numbers only: a suffix ("cat_tree", "dev0") is ignored
+        if not (bit.isascii() and bit.isdigit()):
+            break
+        if len(bit) > MAX_DIGITS:   # (int() of thousands of digits raises; and nobody is on version 10**9)
+            return ()
+        out.append(int(bit))
+    while out and out[-1] == 0:   # (1.0 and 1.0.0 are the same version)
+        out.pop()
+    return tuple(out)
+
+
+def version_key(v) -> tuple:
+    """What orders version strings: backups, peers and the hub's "update available" all use this one.
+    Only the leading numbers count ("1.0.0.cat_tree" is 1.0.0). Three tiers, lowest first: a stamp that isn't a
+    number at all ("", None, "abc"): it can never make anything else look behind; legacy: builds from before the
+    public numbering (1.0.0) stamped "3.0.0.dev0" and other "3.x" strings, so a first number of exactly 3 is one of
+    those, sorted below every public number (and in its own order among its kind); then public numbers (1.x, 2.x,
+    4.x, 10.x...) in their ordinary order. (The rule would have to go if the public number ever reached 3.)"""
+    return (version_tier(v), _numbers(v))
+
+
+LABEL = re.compile(r"v[0-9][0-9A-Za-z._-]{0,45}")   # bongo.version_label
+DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def valid_day(text: str) -> bool:
+    """A real calendar day, from 1970 on (the same rule as shortDate in js/ui.js)."""
+    try:
+        return datetime.date.fromisoformat(text).year >= 1970
+    except ValueError:
+        return False
+
+
+SHOWN_VERSION = re.compile(r"[0-9][0-9A-Za-z._-]{0,19}")
+
+
+def shown_version(v) -> str:
+    """A peer's announced number as the page may show it (it comes from mDNS, so it is not trusted): short and
+    plain, or "" """
+    return v if isinstance(v, str) and SHOWN_VERSION.fullmatch(v) else ""
 
 
 BUILD = re.compile(r"[0-9a-f]{7,12}")   # a short commit, as Settings > Software shows it
@@ -86,6 +137,10 @@ def clean_card(raw) -> dict:
     warnings = raw.get("warnings")
     return {"name": str(raw.get("name") or "")[:40],
             "version": str(raw.get("version") or "")[:20],
+            # what people are shown as its version (bongo.version_label); older builds send none
+            "label": raw["label"] if isinstance(raw.get("label"), str) and LABEL.fullmatch(raw["label"]) else None,
+            # the day its running commit was made, "2026-11-25" (nothing else is accepted); older builds send none
+            "date": raw["date"] if isinstance(raw.get("date"), str) and DAY.fullmatch(raw["date"]) and valid_day(raw["date"]) else None,
             "playing": str(raw.get("playing") or "")[:60] or None,
             "paused": bool(raw.get("paused")),
             "sleeping": bool(raw.get("sleeping")),
@@ -171,9 +226,9 @@ class Card:
         if self.error:   # not answering (or too old): nothing from its last card is current but its name and colour
             card = {"name": card.get("name"), "badge": card.get("badge")}   # and its colour, so the row keeps its shape
         # the card can't override who and where it is: those come from mDNS
-        return {**card, **asdict(self.peer), "name": card.get("name") or self.peer.name, "url": self.peer.url,
+        return {**card, **asdict(self.peer), "version": shown_version(self.peer.version), "name": card.get("name") or self.peer.name, "url": self.peer.url,
                 "seen_ago": round(now - self.seen) if self.seen else None,
-                "behind": behind, "hub": self.peer.id == hub_id, "error": self.error}
+                "behind": behind, "older": version_tier(self.peer.version) < 2, "hub": self.peer.id == hub_id, "error": self.error}
 
 
 class Hub:

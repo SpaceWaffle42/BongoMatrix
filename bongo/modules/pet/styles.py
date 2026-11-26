@@ -150,7 +150,7 @@ def fit(scene: Image.Image, width: int, height: int, feet=None, tall: int = 18, 
 
 
 class Camera:
-    """The view in a room bigger than the screen (Billy 24 Nov: "not so jittery", then "we need a mix of the two").
+    """The view in a room bigger than the screen: steady, not jittery, but still framing her well.
     It frames her as the old camera did, near the middle with room ahead of her as she walks, but moves like the
     steady one: it aims LEAD px ahead of her in the way she is walking and lets her drift ZONE px either side of
     that before it moves; then it moves with her, step for step, so she holds still on screen and the room goes by.
@@ -423,6 +423,9 @@ class _Scene(Style):
             """``pic`` with its top left at (``ox``, ``oy``) from the toy's point (``tx``, ``ty``: whole pixels by
             ``snap``), shrunk about the middle of its lowest row (which stays where it is) by the depth of that row
             (or of hers, while she plays with it)."""
+            if pic.getbbox() is None:                                 # a blank picture (a frame with nothing in it): nothing to draw
+                self.touching.pop(what, None)
+                return
             lowest = snap(ty) + oy + pic.getbbox()[3] - 1           # its lowest row, as drawn full size
 
             def placed(on):
@@ -509,7 +512,9 @@ class Life(_Scene):
         if self.roamer is None:
             return super().locate(now, clock)
         now = roam.like(now, self.roamer.clock)
-        if self.roamer.recent and now < self.roamer.recent[0][0]:      # the clock went back: she starts afresh
+        if (self.roamer.recent and now < self.roamer.recent[0][0]) or now - self.roamer.clock > roam.AWAY:
+            # the clock went back, or on far past where she was (a picture asked for days later): she starts afresh
+            # from the time of day, never living through the gap action by action
             self.roamer = roam.roamer(self.art, self.settings["place"], self.place, self.ctx.pet, now)
         around = self.roamer.around(now)
         if around is not self.window:

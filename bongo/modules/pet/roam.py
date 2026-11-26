@@ -336,6 +336,8 @@ class Roamer:
         self.needs["sleep"] = min(1.0, self.needs["sleep"] + 0.15)
 
 
+AWAY = dt.timedelta(minutes=25)   # away this long and she starts afresh, as her screen coming round again would find her
+
 _LIVES: dict = {}   # (room, pet, name) -> her Roamer, so she carries on where she was when her screen comes round again
 
 
@@ -344,7 +346,7 @@ def roamer(art, key: str, room, pet, now: dt.datetime) -> Roamer:
     r = _LIVES.get(who)
     if r is not None:
         now = like(now, r.clock)
-    stale = r is None or now - r.clock > dt.timedelta(minutes=25) or (r.recent and now < r.recent[0][0])
+    stale = r is None or now - r.clock > AWAY or (r.recent and now < r.recent[0][0])
     if stale:   # first time, long away, or the clock went back: she starts afresh from what the time of day says
         r = _LIVES[who] = Roamer(art, room, pet.name, now, f"{who}{now.date().isoformat()}{now.hour}")
     r.art = art       # today's outfit

@@ -1,14 +1,15 @@
 // Settings: safe area (with a big LED preview), device, splash, sleep, paired devices.
 import { api, get, del, post, put, uploadMedia } from './api.js';
-import { h, icon, toast, fail, clone, same, clamp, humanize, ago, toggle } from './ui.js';
+import { h, icon, toast, fail, clone, same, clamp, humanize, ago, toggle, shortDate } from './ui.js';
 import { FrameLoop } from './led.js';
 import { mediaThumb, mediaTitle, previewButton } from './mediaview.js';
-import { S, onLeave, go, saveConfig, moduleById } from './app.js';
+import { S, onLeave, go, href, saveConfig, moduleById } from './app.js';
 import { helpButton, creditLine } from './help.js';
 import { placePicker } from './editor.js';
 import { lookEditor, keepState, comingUpCard, icons, NAMES as COLOUR_NAMES } from './calendarlook.js';
 import { importBox, importedMore, addons, paintStatus } from './modimport.js';
 import { moduleCards } from './modsettings.js';
+import { pageOf, validPage } from './modpage.js';
 import { DEMO } from './api.js';
 import * as deeplink from './deeplink.js';
 import { brightnessBox } from './daylight.js';
@@ -17,12 +18,12 @@ import { storageBox } from './storage.js';
 
 /** The cards, by a name that never changes (their order is saved on the Matrix: config ``settings_layout``). */
 const CARDS = [['safe_area', () => safeAreaCard()], ['device', () => deviceCard()], ['modules', () => modulesCard()],
-  ['location', () => locationCard()], ['wifi', () => wifiCard()], ['pet', () => petCard()], ['calendars', () => calendarsCard()],
+  ['location', () => locationCard()], ['wifi', () => wifiCard()], ['calendars', () => calendarsCard()],
   ['spotify', () => spotifyCard()], ['weather', () => weatherCard()], ['update', () => updateCard()], ['devices', () => devicesCard()], ['sleep', () => sleepCard()],
   ['splash', () => splashCard()], ['media', () => mediaCard()], ['coming_up', () => comingUpCard(Object.keys(COLOUR_NAMES))],
   ['backup', () => backupCard()]];
 /** As it was before cards could be moved: the safe area across the top, two columns, Coming up across the bottom. */
-const DEFAULT_LAYOUT = { top: ['safe_area'], left: ['device', 'modules', 'location', 'wifi', 'pet', 'calendars', 'spotify', 'weather', 'update'],
+const DEFAULT_LAYOUT = { top: ['safe_area'], left: ['device', 'modules', 'location', 'wifi', 'calendars', 'spotify', 'weather', 'update'],
   right: ['devices', 'sleep', 'splash', 'media', 'backup'], full: ['coming_up'] };
 const ZONES = ['top', 'left', 'right', 'full'];
 const ZONE_NAMES = { top: 'Across the top', left: 'Left column', right: 'Right column', full: 'Across the bottom' };
@@ -385,6 +386,7 @@ function modulesCard() {
       label.textContent = now ? 'On' : 'Off';
       r.classList.toggle('off', !now);
       status.textContent = note(m, now);
+      r.querySelector('.module-page')?.say();
       if (saved && m.settings_card) own.refresh([m.id]);   // its own card says whether it's running
       if (saved && imported[m.id]?.background) { const line = r.querySelector('.module-status'); if (line) paintStatus(line, null); }
     });
@@ -393,8 +395,22 @@ function modulesCard() {
     r.append(sw, h('div', { class: 'module-text' }, h('span', { class: 'strong' }, m.name, m.proposed ? h('span', { class: 'tag' }, 'Proposed') : null,
       m.imported ? h('span', { class: 'tag amber' }, 'Imported') : null),
     m.description ? h('span', { class: 'muted small' }, m.description) : null, status,
-    ...(m.imported && info ? importedMore(m, info, changed, (id, name, opts) => importer.update(id, name, opts)) : [])));
+    ...(m.imported && info ? importedMore(m, info, changed, (id, name, opts) => importer.update(id, name, opts)) : []),
+    pageLink(m, () => !r.classList.contains('off'))));
     return r;
+  };
+  /** A module that has a settings page of its own (Module.settings_page): a button to it, and a line from the page's
+   *  own script (the pet's name). The button stays when the module is off: other screens may still use what it holds. */
+  const pageLink = (m, isOn) => {
+    const page = m.settings_page;
+    if (!validPage(page)) return null;   // (the same check as the page's own route)
+    const line = h('span', { class: 'muted small' });
+    const say = () => import(`./${page.script}`).then((p) => (p.rowNote ? p.rowNote(isOn()) : '')).then((t) => { line.textContent = t; }).catch(() => {});
+    say();
+    const box = h('div', { class: 'module-page row gap-s wrap' },
+      h('a', { class: 'btn small-btn', href: href(pageOf(m.id)), 'data-route': pageOf(m.id), 'aria-label': `${page.title} settings` }, `${page.title} settings`, icon('right')), line);
+    box.say = say;
+    return box;
   };
   const draw = () => {
     const again = keepState(list);
@@ -595,101 +611,6 @@ function wifiCard() {
   const load = () => get('/api/network').then(show).catch(() => { card.hidden = true; });
   load();
   return card;
-}
-
-/** The Matrix's one pet: which animal and its name, shared by the Pet module, Wander and the Pet clock.
- * Picture tiles: the animal, then its shape (the dog has three), then its colour (coat ids "shape.colour"). */
-const PET_NAME = /^[A-Za-z0-9 '.!?-]{1,12}$/;
-
-function petCard() {
-  const pet = { kind: 'cat', name: 'Mochi', coat: '', collar: '', dress_up: true, ...(S.config.pet || {}) };
-  let catalogue = (S.state?.pet_kinds?.length ? S.state.pet_kinds : ['cat']).map((k) => ({ kind: k, title: humanize(k), group: k, group_title: humanize(k), coats: [], collars: [] }));
-  let kind = pet.kind;
-  let coat = pet.coat;
-  let dressUp = pet.dress_up !== false;
-  const name = h('input', { class: 'input', id: 'pet-name', maxlength: 12, value: pet.name, autocomplete: 'off', spellcheck: 'false' });
-  const tiles = (label) => h('div', { class: 'pet-tiles', role: 'radiogroup', 'aria-label': label });
-  const animals = tiles('Animal');
-  const shapes = tiles('Shape');
-  const colours = h('div', { class: 'coat-grid', role: 'radiogroup', 'aria-label': 'Colour' });
-  const chosen = { animal: h('span', { class: 'mono strong' }), shape: h('span', { class: 'mono strong' }), colour: h('span', { class: 'mono strong' }) };
-  const row = (label, said, box) => h('div', { class: 'stack gap-s' }, h('div', { class: 'row between' }, h('span', null, label), said), box);
-  const shapeRow = row('Shape', chosen.shape, shapes);
-  const colourRow = row('Colour', chosen.colour, colours);
-  const collar = h('select', { class: 'input', id: 'pet-collar' });
-  const wardrobe = h('div', { class: 'grid-2', hidden: true },
-    h('label', { class: 'field-col', for: collar.id }, 'Accessory', collar),
-    h('div', { class: 'field-col' }, 'Seasonal outfits',
-      toggle(dressUp, 'Dress up for Christmas and Valentine’s', (v) => { dressUp = v; })));
-  const entry = (k) => catalogue.find((e) => e.kind === k) || catalogue[0];
-  const shapeOf = (id) => (/^[a-z_]+\.[a-z_]+$/.test(id || '') ? id.split('.')[0] : '');
-  const tile = (attrs, face, label, on) => h('button', {
-    type: 'button', class: 'pet-tile', role: 'radio', 'aria-checked': String(on), 'aria-label': label, title: label, ...attrs,
-  }, face ? h('img', { src: face, alt: '' }) : h('span', { class: 'pet-tile-blank' }), h('span', { class: 'small' }, label));
-  const show = () => {
-    const e = entry(kind);
-    kind = e.kind;
-    const groups = catalogue.filter((k, i) => catalogue.findIndex((o) => (o.group || o.kind) === (k.group || k.kind)) === i);   // each animal's first kind
-    animals.replaceChildren(...groups.map((g) => tile({ 'data-group': g.group || g.kind, onclick: () => pickKind(g.kind) },
-      g.face, g.group_title || g.title, (g.group || g.kind) === (e.group || e.kind))));
-    chosen.animal.textContent = e.group_title || e.title;
-    const siblings = catalogue.filter((k) => (k.group || k.kind) === (e.group || e.kind));
-    const options = siblings.flatMap((k) => {
-      const kinds = [...new Set(k.coats.map((c) => c.shape || ''))];
-      return (kinds.length ? kinds : ['']).map((sh) => ({ kind: k, shape: sh, first: k.coats.find((c) => (c.shape || '') === sh) }));
-    });
-    const current = shapeOf(coat) || (e.coats.find((c) => c.id === e.default)?.shape || '');
-    shapes.replaceChildren(...options.map((o) => {
-      const label = o.kind.title + (options.filter((x) => x.kind === o.kind).length > 1 && o.shape ? ` (${humanize(o.shape)})` : '');
-      return tile({ 'data-kind': o.kind.kind, 'data-shape': o.shape, onclick: () => pickShape(o.kind.kind, o.shape) },
-        o.first?.face || o.kind.face, label, o.kind.kind === kind && o.shape === current);
-    }));
-    shapeRow.hidden = options.length < 2;
-    chosen.shape.textContent = e.title;
-    const inShape = e.coats.filter((c) => (c.shape || '') === current);
-    const list = inShape.length ? inShape : e.coats;
-    if (!list.some((c) => c.id === coat)) coat = list.some((c) => c.id === e.default) ? e.default : (list[0]?.id || '');
-    colours.replaceChildren(...list.map((c) => h('button', {
-      type: 'button', class: 'coat', role: 'radio', title: c.name, 'aria-label': c.name, 'data-coat': c.id,
-      'aria-checked': String(c.id === coat), onclick: () => { coat = c.id; show(); },
-    }, c.face ? h('img', { src: c.face, alt: '' }) : h('span', { class: 'small' }, c.name))));
-    colourRow.hidden = list.length < 2;
-    chosen.colour.textContent = list.find((c) => c.id === coat)?.name || '';
-    const have = e.collars || [];
-    wardrobe.hidden = !have.length;
-    collar.replaceChildren(h('option', { value: '' }, 'None'),
-      ...have.map((c) => h('option', { value: c, selected: c === pet.collar || null }, `${humanize(c)} ${e.accessory || 'collar'}`)));
-  };
-  const pickKind = (k) => {
-    const was = entry(kind);
-    const next = entry(k);
-    if (!name.value.trim() || name.value.trim() === was.name) name.value = next.name || name.value;   // her name, unless you gave one
-    kind = next.kind; coat = next.default || ''; show();
-  };
-  const pickShape = (k, sh) => {
-    if (k !== kind) pickKind(k);
-    const e = entry(kind);
-    coat = (e.coats.find((c) => c.id === e.default && (c.shape || '') === sh) || e.coats.find((c) => (c.shape || '') === sh))?.id || coat;
-    show();
-  };
-  show();
-  get('/api/pets').then((r) => { if (r.kinds?.length) catalogue = r.kinds; show(); }).catch(() => { /* older Pi: names only */ });
-  const save = h('button', { type: 'button', class: 'btn primary' }, 'Save');
-  save.onclick = () => {
-    const n = name.value.trim();
-    if (!PET_NAME.test(n)) { toast("Names are 1 to 12 letters, digits or spaces (and ' . ! ? -), so they fit its name tag", 'error'); name.focus(); return; }
-    const outfits = wardrobe.hidden ? {} : { ...(collar.value ? { collar: collar.value } : {}), dress_up: dressUp };
-    saveConfig({ pet: { kind, name: n, ...(coat ? { coat } : {}), ...outfits } }, 'Pet');
-  };
-  return h('section', { class: 'card stack', 'aria-label': 'Pet' },
-    h('div', null, h('h2', { class: 'h2' }, 'Pet'),
-      h('p', { class: 'muted small flush' }, 'One pet per Matrix: the Pet screens, the Wander overlay and the Pet clock all show this one.')),
-    row('Animal', chosen.animal, animals),
-    shapeRow,
-    colourRow,
-    h('label', { class: 'field-col', for: name.id }, 'Name', name),
-    wardrobe,
-    h('div', { class: 'row end' }, save));
 }
 
 /** Linked calendars (bongo/calendars.py): Google / iPhone calendars read from their links, shown on every
@@ -940,6 +861,8 @@ function updateCard() {
   onLeave(stopPoll);
 
   const when = (iso) => { try { return new Date(iso).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }); } catch { return iso; } };
+  // "A new version is ready (9f8e7d6c)": only the short id of the newest commit is known without downloading it
+  const ready8 = (sha) => h('span', { class: 'muted tiny' }, ` (${String(sha).slice(0, 8)})`);
   async function refresh(quiet) {
     try { info = await get('/api/update'); }
     catch (err) { if (!quiet) card.replaceChildren(card.firstChild, h('p', { class: 'danger small' }, `Couldn't read the version: ${err.message}`)); return; }
@@ -963,7 +886,7 @@ function updateCard() {
       try {
         const r = await post('/api/update/check');
         result.className = 'small flush' + (r.available ? ' warn' : ' muted');
-        result.textContent = r.available ? `A new version is ready (${r.latest.slice(0, 8)}).` : 'You have the latest version.';
+        result.replaceChildren(...(r.available ? ['A new version is ready', ready8(r.latest)] : ['You have the latest version.']));
       } catch (err) { result.className = 'small flush danger'; result.textContent = err.message; }
       check.disabled = false;
     };
@@ -1012,7 +935,7 @@ function updateCard() {
       return;
     }
     if (info.known?.available === true && typeof info.known.latest === 'string' && !running) {   // what the daily look found
-      result.className = 'small flush warn'; result.textContent = `A new version is ready (${info.known.latest.slice(0, 8)}).`;
+      result.className = 'small flush warn'; result.replaceChildren('A new version is ready', ready8(info.known.latest));
     } else if (asked && info.known?.available === false && !running) {   // the hub was a moment behind: nothing to do
       result.className = 'small flush muted'; result.textContent = 'You have the latest version.';
     }
@@ -1020,8 +943,9 @@ function updateCard() {
       h('h2', { class: 'h2' }, 'Software'),
       h('div', { class: 'stack-xs' },
         h('span', { class: 'field-label' }, 'Running'),
-        v ? h('span', { class: 'mono small' }, `${v.short} · ${when(v.date)}`) : h('span', { class: 'muted small' }, 'Unknown (not a git checkout)'),
-        v ? h('span', { class: 'muted tiny' }, v.subject) : null),
+        h('span', { class: 'small version-line' }, info.label || 'Unknown',   // the label, the commit's date, then its short id: never the commit's text
+          shortDate(v?.date) ? ` · ${shortDate(v.date)}` : '',   // (the commit's own day, as the hub shows it)
+          typeof v?.short === 'string' && v.short ? h('span', { class: 'muted tiny' }, ` (${v.short})`) : null)),
       stLine,
       h('div', { class: 'row gap-s wrap' }, check, pull), result,
       sourceBox()].filter(Boolean));  // no status line until the first update

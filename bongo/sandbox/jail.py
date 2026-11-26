@@ -180,7 +180,7 @@ def _views(spec: dict) -> list[tuple[str, str, bool]]:
     root = Path(spec["root"])
     out = [(str(root / "bongo"), str(root / "bongo"), False)]
     resources = root / "resources"
-    if resources.is_dir():                     # the fonts and the like, never the pet art (its licence)
+    if resources.is_dir():                     # the fonts and the like, never the pet art (not a module's to read)
         out += [(str(p), str(p), False) for p in sorted(resources.iterdir()) if p.is_dir() and p.name != "pet"]
     prefix = Path(sys.prefix)
     if prefix != Path(sys.base_prefix) or str(prefix).startswith(("/home", "/root")):

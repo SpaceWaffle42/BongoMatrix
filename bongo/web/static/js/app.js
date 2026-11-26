@@ -6,7 +6,9 @@ import { afterPairing } from './deeplink.js';
 /** Shared state. `draft` is the locally edited playlist; `config.playlist` is what the Matrix has. */
 export const S = { state: null, config: null, modules: null, draft: null, problems: [], online: true, polledAt: 0,
   revs: null,     // revs: the Matrix's mark for each config section as this page loaded it (see putConfig)
-  theirs: false };   // the playlist was changed on another phone or tab while this one had edits of its own (freshen)
+  theirs: false,   // the playlist was changed on another phone or tab while this one had edits of its own (freshen)
+  back: null,      // a page opened from a screen's editor says so, to link back: { to: '/edit/2', label: 'Pet · Life' }
+  kept: false };   // ...and the editor, opened again from there, says its edits were kept
 export const bus = new EventTarget();
 const emit = (type) => bus.dispatchEvent(new Event(type));
 
@@ -21,6 +23,7 @@ const ROUTES = [
   [/^\/(playlist)?$/, () => import('./now.js')],
   [/^\/edit\/(\d+)$/, () => import('./editor.js')],
   [/^\/settings$/, () => import('./settings.js')],
+  [/^\/modules\/([a-z0-9_]+)$/, () => import('./modpage.js')],   // a module's own settings page (Module.settings_page)
   [/^\/logs$/, () => import('./logs.js')],
   [/^\/pair$/, () => import('./pair.js')],
   [/^\/animator$/, async () => ({ render(view) {  // the animator page, framed in the dashboard
@@ -82,10 +85,12 @@ async function render() {
   }
   if (seq !== renderSeq) return;
   document.body.dataset.route = p.startsWith('/edit') ? '/edit' : p;
+  if (!p.startsWith('/edit')) S.kept = false;   // (the editor it was for isn't coming)
   document.body.classList.toggle('pairing', p === '/pair');
   paintNav(p);
   paintHeader();
   view.replaceChildren();
+  view.className = 'view';   // (a page may add classes of its own, such as a module's settings page: not for the next one)
   view.scrollTop = 0;
   if (S.theirs) freshen();   // (out of the editor: a playlist saved elsewhere meanwhile can come in now)
   try { mod.render(view, p.match(route[0])); }
@@ -102,7 +107,7 @@ function showOffline(view, err) {
 }
 
 function paintNav(p) {
-  const active = p.startsWith('/edit') ? '/playlist' : p;
+  const active = p.startsWith('/edit') ? '/playlist' : p.startsWith('/modules/') ? '/settings' : p;
   const link = ([to, long, short, ic], cls) => h('a', {
     href: href(to), class: cls, 'data-route': to, 'aria-current': active === to ? 'page' : null, title: cls === 'tab' ? null : long,   // (the name, where the side menu is only icons: the Animator)
   }, icon(ic), h('span', null, cls === 'tab' ? short : long));

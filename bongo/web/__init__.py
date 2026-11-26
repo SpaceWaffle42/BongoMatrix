@@ -27,8 +27,10 @@ from zoneinfo import ZoneInfo
 from flask import Flask, Response, abort, jsonify, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
 
+from bongo import version_label
 from bongo import animator, config as cfg, logo, net, netname, pets, sprite_preview, update
 from bongo import addons, events, media, places, private, standins
+from bongo import fonts as font_tools
 from bongo.fonts import Fonts, names as font_names, table as font_table
 from bongo.module import Context
 from bongo.player import Entry
@@ -122,9 +124,6 @@ def verify_new(current: dict, merged: dict, modules: dict) -> list[str]:
         else:
             problems += [f"{where}: {p}" for p in module.verify(merged_settings)]
     return problems
-
-
-FONT_FILE = re.compile(r"fonts/[A-Za-z0-9_-]+\.woff2")   # the dashboard's own fonts, by plain file name only
 
 
 def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = None,
@@ -307,7 +306,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         picture = config["web"].get("hub_picture", True) is not False
         if picture and live.frame_png(public=True) is None:
             warnings.append("No picture yet")
-        return jsonify(id=netname.mac_suffix(), name=config.get("name") or netname.DEFAULT_NAME, version=__version__,
+        return jsonify(id=netname.mac_suffix(), name=config.get("name") or netname.DEFAULT_NAME, version=__version__, label=version_label(update.source(config)[1]),
                        **software(config),   # which build, and whether a newer one is ready: for the hub's Update… button
                        playing=label(entry["module"], entry.get("style")) if entry.get("module") else None,
                        paused=status.get("paused", False), sleeping=bool(status.get("asleep")),
@@ -364,11 +363,15 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     @app.get("/api/pets")
     def pet_catalogue():
         """The animals there's art for and their coats, each with a little picture for the picker: the animal
-        (``group``: the dog's shapes are one animal), then its shapes, then each shape's colours."""
+        (``group``: the dog's shapes are one animal), then its shapes, then each shape's colours. ``rooms``: the room
+        sizes to offer for each animal on this Matrix's panel (pets.room_sizes), drawn in the place each names."""
+        area = cfg.safe_area(load())
+        panel = (area.panel_width, area.panel_height)
         return jsonify(kinds=[{"kind": k, "title": pets.title(k), "group": pets.group(k),
                                "group_title": pets.title(pets.group(k)), "name": pets.default_name(k),
                                "accessory": pets.accessory(k),
                                "default": pets.default_coat(k), "collars": pets.collars(k),
+                               "rooms": pets.room_sizes(k, panel),
                                "face": face_uri(k, pets.default_coat(k)),
                                "coats": [{**c, "shape": pets.shape(c["id"]), "face": face_uri(k, c["id"])}
                                          for c in pets.coat_names(k)]}
@@ -378,7 +381,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     def frame():
         # the dashboard's live preview: what's playing, never a covering screen. The PIN in particular
         # must never be on a web page: a browser already paired on another address (http://10.0.0.4
-        # vs http://dev-matrix.local are separate sites) would otherwise show it while pairing
+        # vs http://kitchen-matrix.local are separate sites) would otherwise show it while pairing
         png = live.frame_png(public=True)
         if png is None:
             abort(404)
@@ -1203,6 +1206,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             if key in data and not isinstance(data[key], dict):
                 return jsonify(problems=[f"{key}: send an object"]), 422
         data = standins.unmask(data, current, modules)   # (the stand-in a page holds for a saved secret: the secret again)
+        data = font_tools.renamed(data)                   # (a removed font named by a page loaded before the update)
         for side, value in (data.get("safe_area") or {}).items():   # 1e999 would overflow turning it into pixels
             if isinstance(value, float) and not math.isfinite(value):
                 return jsonify(problems=[f"safe_area: {side} must be a number of pixels"]), 422
@@ -1337,8 +1341,14 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         if addons.is_imported(modules[name]) and name in cfg.modules_off(load()):
             return jsonify(error="that module is switched off"), 409   # off means its code doesn't run at all
         try:
-            settings = json.loads(request.args.get("settings", "{}"))
+            settings = font_tools.renamed(json.loads(request.args.get("settings", "{}")))
             config = load()
+            pet = pets.of(config)
+            if "pet" in request.args:   # the pet as picked on the Pet page, not saved yet (the same checks as a save)
+                rule = json.loads(request.args["pet"])
+                if pets.problems(rule) or not isinstance(rule, dict):
+                    return jsonify(error="; ".join(pets.problems(rule)) or "pet: must be an object"), 422
+                pet = pets.of({"pet": rule})
             if isinstance(settings, dict) and standins.own_names(modules[name], request.args.get("style") or None):
                 # a secret saved with a screen reaches the page as a stand-in (bongo/standins.py): drawn with the secret
                 screen = {"module": name, "style": request.args.get("style") or None, "settings": settings}
@@ -1348,9 +1358,11 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             settings_json = json.dumps(settings, sort_keys=True)
             area = cfg.safe_area(config)
             style = preview_style(name, request.args.get("style", ""), settings_json, area.width, area.height,
-                                  pets.of(config), json.dumps(config.get("location"), sort_keys=True),
+                                  pet, json.dumps(config.get("location"), sort_keys=True),
                                   config.get("timezone") or None, json.dumps(cfg.calendar_look(config), sort_keys=True),
                                   calendars_changed())
+        except RecursionError:   # brackets nested thousands deep
+            return jsonify(error="settings or pet: nested too deeply"), 422
         except (ValueError, TypeError, KeyError, OSError) as error:
             return jsonify(error=str(error)), 422
         t = number(request.args.get("t", time.time()), 0, 4_102_444_800, "t")  # up to 2100
@@ -1484,7 +1496,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     def update_info():
         config = load()
         url, branch = update.source(config)
-        return jsonify(version=update.version(), url=url, branch=branch, status=update.status(data_dir),
+        return jsonify(version=update.version(), label=version_label(branch), url=url, branch=branch, status=update.status(data_dir),
                        default_url=update.DEFAULT_URL, default_branch=update.DEFAULT_BRANCH,
                        known=update.known(config, data_dir))   # the last look's answer: nobody is asked here
 
@@ -1562,15 +1574,6 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             return send_from_directory(STATIC, "setup.html")   # a phone on the setup hotspot gets the setup page
         if path == "hub" or (path == "index.html" and request.host.split(":")[0].lower() == "matrix.local"):
             return send_from_directory(STATIC, "hub.html")     # http://matrix.local: every Matrix on the network
-        if FONT_FILE.fullmatch(path) and (STATIC / f"{path}.b64").is_file():   # (never a path out of fonts/)
-            # the dashboard's fonts are kept as base64 text, like the pet art (the repo holds no binary files)
-            answer = Response(font_bytes(path), mimetype="font/woff2")
-            answer.headers["Cache-Control"] = "public, max-age=604800"
-            return answer
         return send_from_directory(STATIC, path if target.is_file() else "index.html")
-
-    @lru_cache(maxsize=8)
-    def font_bytes(path: str) -> bytes:
-        return base64.b64decode((STATIC / f"{path}.b64").read_text())
 
     return app

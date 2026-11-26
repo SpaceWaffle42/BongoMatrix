@@ -304,11 +304,11 @@ def _newer(data: dict) -> bool:
     if data[MARK] > FORMAT:
         return True
     theirs = data.get("version")
-    if not isinstance(theirs, str) or not re.fullmatch(r"[0-9]+(\.[A-Za-z0-9_]+)*", theirs.strip()):   # (ASCII digits only)
+    if not isinstance(theirs, str) or len(theirs) > 64 or not re.fullmatch(r"[0-9]+(\.[A-Za-z0-9_]+)*", theirs.strip()):   # (ASCII digits only)
         return False
     try:
         return version_key(theirs.strip()) > version_key(__version__)
-    except TypeError:   # (never, as the parts are built: but a comparison mustn't be what stops a restore)
+    except (TypeError, ValueError):   # (never, as the parts are built: but a comparison mustn't be what stops a restore)
         return False
 
 

@@ -164,6 +164,8 @@ def describe(module) -> dict:
         "id": module.id, "name": module.name, "description": module.description,
         **({"limits": {n: list(v) for n, v in module.limits.items()}} if module.limits else {}),   # [lowest, highest]
         **({"help": module.help} if module.help else {}),
+        **({"settings_page": module.settings_page} if module.settings_page else {}),
+        **({"page_links": module.page_links} if module.page_links else {}),
         **({"actions": [{"name": n, "label": label} for n, label in module.actions.items()]} if module.actions else {}),
         "default_style": module.default_style,
         "settings": fields(module.defaults, shared_choices, basic=module.basic),
