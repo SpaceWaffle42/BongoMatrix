@@ -135,6 +135,11 @@ is needed or sent: a Matrix's own git settings never give that address a token. 
 point a display somewhere else (your own fork, say); it warns first, because whatever is at that address runs on
 the display. `python -m bongo update` checks from the command line.
 
+**Beta channel.** The `prod_device` branch of that repository is built from every green change and is where new work
+arrives first; `main` is the release, moved up from `prod_device` by hand. To follow the beta, open Settings →
+Software → Advanced and set the branch to `prod_device` (the version then reads `v1.0.0.prod_device`); set it back to
+`main` to return to releases.
+
 Modules made for the Matrix by its author, to import from Settings → Modules → Import:
 https://github.com/SpaceWaffle42/BongoMatrix-imports.
 
